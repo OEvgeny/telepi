@@ -6,6 +6,7 @@ import {
   findTopicByName,
   getBotToken,
   readConfig,
+  resolvePath,
   resolveUser,
   resolveConfigPath,
   serializableConfig,
@@ -146,6 +147,29 @@ program
     }
     save(config);
     console.log(`created agent ${options.id}`);
+  });
+
+program
+  .command("agent:skills")
+  .description("List or modify an agent's skills")
+  .requiredOption("--id <id>", "Agent id")
+  .option("--add <path...>", "Skill file(s) relative to project root")
+  .option("--remove <path...>", "Skill file(s) to detach")
+  .action((options) => {
+    const config = load();
+    const agent = config.agents[options.id];
+    if (!agent) throwCli(`unknown agent: ${options.id}`);
+    const skills = new Set(agent.skills || []);
+    for (const skill of options.add || []) {
+      if (!existsSync(resolvePath(config.project.root, skill))) throwCli(`skill file not found: ${skill}`);
+      skills.add(skill);
+    }
+    for (const skill of options.remove || []) {
+      if (!skills.delete(skill)) throwCli(`skill not attached: ${skill}`);
+    }
+    agent.skills = [...skills];
+    if (options.add?.length || options.remove?.length) save(config);
+    console.log(agent.skills.length ? agent.skills.join("\n") : "(no skills)");
   });
 
 program
