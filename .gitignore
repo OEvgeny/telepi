@@ -1,0 +1,7 @@
+node_modules/
+.env
+.telepi/
+entities/
+npm-debug.log*
+skills/
+config/telepi.yaml

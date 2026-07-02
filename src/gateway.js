@@ -1,0 +1,1017 @@
+#!/usr/bin/env node
+import { randomBytes } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { readConfig, getBotToken, findTopic } from "./config.js";
+import { TelegramClient, hydrateEnvelopeMedia, updateToEnvelope } from "./telegram.js";
+import { compactPiSession, parseCompactCommand } from "./pi-compact.js";
+import { startPiForTopic } from "./pi-session.js";
+import { toTelegramMarkdownV2 } from "./telegram-format.js";
+
+const configPath = process.argv.includes("--config")
+  ? process.argv[process.argv.indexOf("--config") + 1]
+  : undefined;
+
+async function main() {
+  let config = readConfig(configPath);
+  const telegram = new TelegramClient(getBotToken(config));
+  const me = await telegram.getMe();
+  await configureBotCommands(telegram, config);
+  console.error(`telepi gateway connected as ${me.first_name} (@${me.username || "unknown"})`);
+
+  let offset = Number(process.env.TELEPI_UPDATE_OFFSET || 0) || undefined;
+  const inFlight = new Map();
+  let pollFailures = 0;
+
+  while (true) {
+    config = reloadConfig(config, configPath);
+    let updates;
+    try {
+      updates = await telegram.getUpdates({
+        offset,
+        timeoutSeconds: config.telegram.poll_timeout_seconds,
+        limit: config.telegram.poll_limit,
+      });
+      pollFailures = 0;
+    } catch (error) {
+      pollFailures += 1;
+      const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(pollFailures - 1, 5));
+      console.error(`getUpdates failed (attempt ${pollFailures}), retrying in ${delayMs}ms: ${error.message}`);
+      await sleep(delayMs);
+      continue;
+    }
+
+    for (const update of updates) {
+      offset = update.update_id + 1;
+      if (update.callback_query) {
+        handleCallbackQuery(config, telegram, inFlight, update.callback_query).catch((error) => {
+          console.error(`callback handling failed: ${error.stack || error.message}`);
+        });
+        continue;
+      }
+      let envelope = updateToEnvelope(update);
+      if (!envelope) continue;
+      envelope = normalizeTelegramCommands(envelope, me.username);
+      if (!isAllowedUser(config, envelope.userId)) {
+        console.error(`ignored unauthorized user ${envelope.userId}`);
+        continue;
+      }
+      const topic = findTopic(config, envelope.chatId, envelope.topicId);
+      if (!topic || topic.enabled === false) {
+        console.error(`ignored unknown topic chat=${envelope.chatId} topic=${envelope.topicId}`);
+        continue;
+      }
+      const configForMessage = config;
+      const key = `${envelope.chatId}:${envelope.topicId}`;
+      const active = inFlight.get(key);
+      if (active) {
+        steerRunningTopic(configForMessage, telegram, topic, envelope, active).catch((error) => {
+          console.error(`steering dispatch failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
+        });
+        continue;
+      }
+
+      const run = startTopicMessage(configForMessage, telegram, topic, envelope);
+      inFlight.set(key, run);
+      run.promise.finally(() => {
+        if (inFlight.get(key) === run) inFlight.delete(key);
+      });
+    }
+  }
+}
+
+async function configureBotCommands(telegram, config) {
+  const commands = [
+    {
+      command: "compact",
+      description: "Compact the current pi session with an optional prompt",
+    },
+  ];
+  for (const scope of commandScopes(config)) {
+    await telegram.deleteMyCommands({ scope }).catch((error) => {
+      console.error(`delete bot commands failed scope=${JSON.stringify(scope)}: ${error.message}`);
+    });
+  }
+  await telegram.setMyCommands(commands).catch((error) => {
+    console.error(`set bot commands failed: ${error.message}`);
+  });
+  await telegram.setMyCommands(commands, { scope: { type: "all_private_chats" } }).catch((error) => {
+    console.error(`set private bot commands failed: ${error.message}`);
+  });
+  for (const chatId of commandChatIds(config)) {
+    await telegram.setMyCommands(commands, { scope: { type: "chat", chat_id: chatId } }).catch((error) => {
+      console.error(`set chat bot commands failed chat=${chatId}: ${error.message}`);
+    });
+    await telegram.setChatMenuButton({ chatId, menuButton: { type: "commands" } }).catch((error) => {
+      console.error(`set chat menu button failed chat=${chatId}: ${error.message}`);
+    });
+  }
+  await telegram.setChatMenuButton({ menuButton: { type: "commands" } }).catch((error) => {
+    console.error(`set default menu button failed: ${error.message}`);
+  });
+}
+
+function commandScopes(config) {
+  const scopes = [
+    undefined,
+    { type: "all_private_chats" },
+    { type: "all_group_chats" },
+    { type: "all_chat_administrators" },
+  ];
+  for (const chatId of commandChatIds(config)) {
+    scopes.push({ type: "chat", chat_id: chatId });
+  }
+  return scopes;
+}
+
+function commandChatIds(config) {
+  const chatIds = new Set();
+  if (config.manager?.chat_id) chatIds.add(String(config.manager.chat_id));
+  for (const user of Object.values(config.users?.aliases || {})) {
+    if (user.id) chatIds.add(String(user.id));
+  }
+  for (const topic of config.topics || []) {
+    if (topic.chat_id) chatIds.add(String(topic.chat_id));
+  }
+  return [...chatIds];
+}
+
+function normalizeTelegramCommands(envelope, botUsername) {
+  if (!botUsername || !envelope.text) return envelope;
+  const pattern = new RegExp(`^/(compact)@${escapeRegExp(botUsername)}(?=\\s|$)`, "i");
+  const text = envelope.text.replace(pattern, "/$1");
+  return text === envelope.text ? envelope : { ...envelope, text };
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function reloadConfig(previousConfig, path) {
+  try {
+    return readConfig(path);
+  } catch (error) {
+    console.error(`config reload failed: ${error.message}`);
+    return previousConfig;
+  }
+}
+
+function startTopicMessage(config, telegram, topic, envelope) {
+  let resolveReady;
+  const run = {
+    abort: undefined,
+    steer: undefined,
+    acceptsSteering: false,
+    cancelled: false,
+    cancelToken: randomBytes(9).toString("base64url"),
+    cancelMessage: undefined,
+    cancelAttachTimer: undefined,
+    cancelButtonAttached: false,
+    cancelGeneration: 0,
+    currentReplyToMessageId: envelope.messageId,
+    displayedMessageCount: 0,
+    displayQueue: Promise.resolve(),
+    toolDisplayMessages: new Map(),
+    ready: undefined,
+    readyError: undefined,
+    readySettled: false,
+    resolveReady: undefined,
+    promise: undefined,
+  };
+  run.ready = new Promise((resolve) => {
+    resolveReady = resolve;
+  });
+  run.resolveReady = () => {
+    if (run.readySettled) return;
+    run.readySettled = true;
+    resolveReady();
+  };
+  run.promise = (async () => {
+    const hydratedEnvelope = await hydrateEnvelopeMedia(telegram, config, envelope).catch((error) => {
+      console.error(`media hydration failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
+      return envelope;
+    });
+    return handleTopicMessage(config, telegram, topic, hydratedEnvelope, run);
+  })().catch(async (error) => {
+    run.readyError = error;
+    run.resolveReady();
+    console.error(`message handling failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: envelope.messageId,
+      text: `Failed to handle message for ${topic.name}: ${error.message}`,
+    }).catch((sendError) => {
+      console.error(`failure response failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${sendError.message}`);
+    });
+  });
+  return run;
+}
+
+async function steerRunningTopic(config, telegram, topic, envelope, active) {
+  const compactInstructions = parseCompactCommand(envelope.text);
+  if (compactInstructions !== null) {
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: envelope.messageId,
+      text: `Cannot compact ${topic.name} while it is running. Send /compact after the current run finishes.`,
+    }).catch((error) => {
+      console.error(`busy compact response failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.message}`);
+    });
+    return;
+  }
+
+  const hydratedEnvelope = await hydrateEnvelopeMedia(telegram, config, envelope).catch((error) => {
+    console.error(`steering media hydration failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
+    return envelope;
+  });
+  try {
+    await active.ready;
+    if (active.readyError) throw active.readyError;
+    if (!active.acceptsSteering || !active.steer) throw new Error("topic is not accepting steering");
+    await active.steer(hydratedEnvelope);
+    console.error(`steered chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${envelope.messageId}`);
+  } catch (error) {
+    console.error(`steering failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: envelope.messageId,
+      text: `Steering failed for ${topic.name}: ${error.message}`,
+    }).catch((sendError) => {
+      console.error(`steering failure response failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${sendError.message}`);
+    });
+  }
+}
+
+async function handleTopicMessage(config, telegram, topic, envelope, active) {
+  console.error(`routing chat=${envelope.chatId} topic=${envelope.topicId} to ${topic.agent}/${topic.session_id}`);
+  const compactInstructions = parseCompactCommand(envelope.text);
+  if (compactInstructions !== null) {
+    active.acceptsSteering = false;
+    active.resolveReady();
+    await handleCompactCommand(config, telegram, topic, envelope, compactInstructions);
+    return;
+  }
+  const startedAt = Date.now();
+  const stopWorkingIndicator = startWorkingIndicator(config, telegram, topic, envelope);
+  const displayMessages = configuredDisplayMessages(config, topic);
+  const useDefaultAssistantDisplay = !hasConfiguredDisplayMessages(config, topic);
+  let result;
+  try {
+    const piRun = await startPiForTopic(config, topic, envelope, {
+      onText: useDefaultAssistantDisplay
+        ? (text) => sendStreamingText(telegram, active, envelope, text)
+        : undefined,
+      onEvent: (event) => {
+        updateReplyAnchorFromPiEvent(active, event);
+        if (!useDefaultAssistantDisplay) {
+          queueDisplayPiEvent(config, telegram, active, envelope, event, displayMessages);
+        }
+      },
+    });
+    active.abort = piRun.abort;
+    active.steer = piRun.steer;
+    active.acceptsSteering = true;
+    active.resolveReady();
+    result = await piRun.promise;
+  } finally {
+    active.acceptsSteering = false;
+    active.abort = undefined;
+    active.steer = undefined;
+    active.resolveReady();
+    await active.displayQueue.catch((error) => {
+      console.error(`display queue failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
+    });
+    await clearCancelButton(telegram, active);
+    stopWorkingIndicator();
+  }
+  const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+  console.error(`completed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} ok=${result.ok} code=${result.code} duration=${durationSeconds}s`);
+  if (active.cancelled) {
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
+      text: `Cancelled ${topic.name}.`,
+    });
+    return;
+  }
+  if (result.ok && (result.streamedTextCount > 0 || active.displayedMessageCount > 0)) return;
+  const output = result.stdout || result.stderr;
+  const text = result.ok
+    ? (output || `${topic.agent} completed without output.`)
+    : `pi session failed (${result.code})\n\n${output || "No output"}`;
+  await sendLongMessage(telegram, {
+    chatId: envelope.chatId,
+    topicId: envelope.topicId,
+    replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
+    text,
+  });
+}
+
+async function handleCallbackQuery(config, telegram, inFlight, query) {
+  const userId = query.from?.id == null ? null : String(query.from.id);
+  if (!isAllowedUser(config, userId)) {
+    await telegram.answerCallbackQuery({
+      callbackQueryId: query.id,
+      text: "Not allowed",
+      showAlert: true,
+    }).catch((error) => {
+      console.error(`answer unauthorized callback failed: ${error.message}`);
+    });
+    console.error(`ignored unauthorized callback user ${userId}`);
+    return;
+  }
+
+  const buttonRef = parseButtonCallbackData(query.data);
+  if (buttonRef) {
+    await handleButtonCallback(config, telegram, inFlight, query, buttonRef);
+    return;
+  }
+
+  const token = parseCancelCallbackData(query.data);
+  if (!token) {
+    await telegram.answerCallbackQuery({ callbackQueryId: query.id }).catch((error) => {
+      console.error(`answer unknown callback failed: ${error.message}`);
+    });
+    return;
+  }
+
+  const active = [...inFlight.values()].find((run) => run.cancelToken === token);
+  if (!active) {
+    await telegram.answerCallbackQuery({
+      callbackQueryId: query.id,
+      text: "This run is no longer active.",
+    }).catch((error) => {
+      console.error(`answer stale cancel failed: ${error.message}`);
+    });
+    await removeCallbackMessageMarkup(telegram, query).catch((error) => {
+      console.error(`remove stale cancel button failed: ${error.message}`);
+    });
+    return;
+  }
+
+  try {
+    await active.ready;
+    if (active.readyError) throw active.readyError;
+    if (!active.abort) throw new Error("run is not accepting cancellation");
+    await telegram.answerCallbackQuery({
+      callbackQueryId: query.id,
+      text: "Cancelling...",
+    });
+    active.cancelled = true;
+    await active.abort();
+    await clearCancelButton(telegram, active);
+    console.error(`cancel requested token=${token} user=${userId}`);
+  } catch (error) {
+    console.error(`cancel failed token=${token}: ${error.stack || error.message}`);
+    await telegram.answerCallbackQuery({
+      callbackQueryId: query.id,
+      text: `Cancel failed: ${error.message}`,
+      showAlert: true,
+    }).catch((sendError) => {
+      console.error(`answer cancel failure failed: ${sendError.message}`);
+    });
+  }
+}
+
+async function handleButtonCallback(config, telegram, inFlight, query, buttonRef) {
+  const callback = findButtonCallback(config, buttonRef);
+  if (!callback) {
+    await telegram.answerCallbackQuery({
+      callbackQueryId: query.id,
+      text: "This button is no longer available.",
+    }).catch((error) => {
+      console.error(`answer unknown button failed: ${error.message}`);
+    });
+    await removeCallbackMessageMarkup(telegram, query).catch((error) => {
+      console.error(`remove unknown button markup failed: ${error.message}`);
+    });
+    return;
+  }
+
+  const topic = findTopic(config, callback.chat_id, callback.topic_id);
+  if (!topic || topic.enabled === false) {
+    await telegram.answerCallbackQuery({
+      callbackQueryId: query.id,
+      text: "This topic is not routed here.",
+      showAlert: true,
+    }).catch((error) => {
+      console.error(`answer unrouted button failed: ${error.message}`);
+    });
+    console.error(`ignored button for unknown topic chat=${callback.chat_id} topic=${callback.topic_id}`);
+    return;
+  }
+
+  // Ack without awaiting so the inFlight check/registration below stays
+  // synchronous; otherwise concurrent clicks could start duplicate runs.
+  const answered = telegram.answerCallbackQuery({
+    callbackQueryId: query.id,
+    text: callback.label ? `${callback.label}`.slice(0, 180) : "Selected",
+  }).catch((error) => {
+    console.error(`answer button callback failed: ${error.message}`);
+  });
+  // Buttons are one-shot: drop the keyboard so the choice can't be re-tapped.
+  removeCallbackMessageMarkup(telegram, query).catch((error) => {
+    console.error(`remove tapped button markup failed: ${error.message}`);
+  });
+
+  const envelope = envelopeFromButtonCallback(query, callback);
+  const key = `${envelope.chatId}:${envelope.topicId}`;
+  const active = inFlight.get(key);
+  if (active) {
+    await answered;
+    await steerRunningTopic(config, telegram, topic, envelope, active);
+    return;
+  }
+
+  const run = startTopicMessage(config, telegram, topic, envelope);
+  inFlight.set(key, run);
+  run.promise.finally(() => {
+    if (inFlight.get(key) === run) inFlight.delete(key);
+  });
+  await answered;
+}
+
+function parseCancelCallbackData(data) {
+  const match = String(data || "").match(/^telepi:cancel:([A-Za-z0-9_-]+)$/);
+  return match?.[1] || null;
+}
+
+function parseButtonCallbackData(data) {
+  const match = String(data || "").match(/^telepi:btn:([A-Za-z0-9_-]+):(\d+)$/);
+  return match ? { token: match[1], index: Number(match[2]) } : null;
+}
+
+function findButtonCallback(config, { token, index }) {
+  const path = buttonCallbackStorePath(config);
+  if (!existsSync(path)) return null;
+  const lines = readFileSync(path, "utf8").trim().split("\n").filter(Boolean);
+  for (let lineIndex = lines.length - 1; lineIndex >= 0; lineIndex -= 1) {
+    try {
+      const record = JSON.parse(lines[lineIndex]);
+      if (record?.token === token) return normalizeButtonCallback(record, index);
+    } catch {
+      // Ignore malformed historical records.
+    }
+  }
+  return null;
+}
+
+function normalizeButtonCallback(record, index) {
+  const button = record.buttons?.[index];
+  if (!button) return null;
+  return {
+    chat_id: String(record.chat_id || ""),
+    topic_id: record.topic_id == null ? null : String(record.topic_id),
+    message_id: record.message_id == null ? "" : String(record.message_id),
+    label: button.label == null ? "" : String(button.label),
+    data: button.data == null ? "" : String(button.data),
+  };
+}
+
+function buttonCallbackStorePath(config) {
+  return resolve(config.project.cache_dir, "button-callbacks.jsonl");
+}
+
+function envelopeFromButtonCallback(query, callback) {
+  const user = query.from || {};
+  const userName = [user.first_name, user.last_name].filter(Boolean).join(" ") || user.username || "unknown";
+  return {
+    updateId: `callback:${query.id}`,
+    chatId: callback.chat_id,
+    topicId: callback.topic_id,
+    userId: user.id == null ? null : String(user.id),
+    userName,
+    messageId: callback.message_id || (query.message?.message_id == null ? "" : String(query.message.message_id)),
+    text: callback.data || callback.label,
+    attachments: [],
+    replyTo: callback.message_id ? {
+      messageId: callback.message_id,
+      text: query.message?.text || query.message?.caption || "",
+      userName: query.message?.from?.first_name || query.message?.from?.username || "",
+    } : undefined,
+  };
+}
+
+async function sendStreamingText(telegram, active, envelope, text) {
+  const previous = active.cancelMessage;
+  active.cancelGeneration += 1;
+  active.cancelMessage = undefined;
+  active.cancelButtonAttached = false;
+  clearTimeout(active.cancelAttachTimer);
+  active.cancelAttachTimer = undefined;
+  if (previous) {
+    await clearTelegramMessageReplyMarkup(telegram, previous).catch((error) => {
+      if (!isReplyMarkupAlreadyClear(error)) {
+        console.error(`clear previous cancel button failed chat=${previous.chatId} message=${previous.messageId}: ${error.message}`);
+      }
+    });
+  }
+
+  const sentMessages = await sendLongMessage(telegram, {
+    chatId: envelope.chatId,
+    topicId: envelope.topicId,
+    replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
+    text,
+  });
+  const latest = sentMessages.at(-1);
+  active.displayedMessageCount += sentMessages.length;
+  if (!active.cancelled && latest?.message_id) {
+    active.cancelMessage = {
+      chatId: String(latest.chat?.id || envelope.chatId),
+      messageId: String(latest.message_id),
+    };
+    scheduleCancelButton(telegram, active);
+  }
+  return sentMessages;
+}
+
+function queueDisplayPiEvent(config, telegram, active, envelope, event, displayMessages) {
+  const items = displayItemsFromPiEvent(event).filter((item) => isDisplayMessageAllowed(displayMessages, item.type));
+  for (const item of items) {
+    active.displayQueue = active.displayQueue
+      .catch(() => undefined)
+      .then(() => displayPiItem(telegram, active, envelope, item));
+  }
+}
+
+async function displayPiItem(telegram, active, envelope, item) {
+  if (item.toolCallId) {
+    await sendOrEditToolDisplayText(telegram, active, envelope, item);
+    return;
+  }
+  await sendStreamingText(telegram, active, envelope, item.text);
+}
+
+async function sendOrEditToolDisplayText(telegram, active, envelope, item) {
+  const existing = active.toolDisplayMessages.get(item.toolCallId);
+  if (!existing) {
+    const sentMessages = await sendStreamingText(telegram, active, envelope, item.text);
+    const latest = sentMessages.at(-1);
+    if (latest?.message_id) {
+      active.toolDisplayMessages.set(item.toolCallId, {
+        chatId: String(latest.chat?.id || envelope.chatId),
+        messageId: String(latest.message_id),
+        text: item.text,
+      });
+    }
+    return;
+  }
+
+  if (existing.text === item.text) return;
+  await editTelegramMessageText(telegram, {
+    chatId: existing.chatId,
+    messageId: existing.messageId,
+    text: item.text,
+    replyMarkup: shouldKeepCancelButton(active, existing) ? cancelButtonMarkup(active.cancelToken) : undefined,
+  });
+  existing.text = item.text;
+}
+
+function shouldKeepCancelButton(active, message) {
+  return Boolean(
+    active.abort &&
+    !active.cancelled &&
+    active.cancelMessage &&
+    String(active.cancelMessage.chatId) === String(message.chatId) &&
+    String(active.cancelMessage.messageId) === String(message.messageId),
+  );
+}
+
+function configuredDisplayMessages(config, topic) {
+  return configuredDisplayMessagesFor(config, topic) || ["assistant/message"];
+}
+
+function hasConfiguredDisplayMessages(config, topic) {
+  return configuredDisplayMessagesFor(config, topic) != null;
+}
+
+function configuredDisplayMessagesFor(config, topic) {
+  return topic.display_messages || config.agents?.[topic.agent]?.display_messages || config.telegram.display_messages;
+}
+
+function isDisplayMessageAllowed(displayMessages, type) {
+  const values = displayMessages.map((value) => String(value).trim()).filter(Boolean);
+  if (!values.length) return false;
+  if (values.includes(type)) return true;
+  const category = type.split("/")[0];
+  return values.includes(category);
+}
+
+function displayItemsFromPiEvent(event) {
+  if (!event || typeof event !== "object") return [];
+  const assistantItem = assistantDisplayItemFromEvent(event);
+  if (assistantItem) return [assistantItem];
+
+  const customItem = customDisplayItemFromEvent(event);
+  if (customItem) return [customItem];
+
+  const toolItem = toolDisplayItemFromEvent(event);
+  if (toolItem) return [toolItem];
+
+  return [];
+}
+
+function assistantDisplayItemFromEvent(event) {
+  if (event.type !== "message_update") return null;
+  const messageEvent = event.assistantMessageEvent;
+  if (!messageEvent?.type) return null;
+  if (messageEvent.type === "text_end") {
+    const text = String(messageEvent.content || "").trim();
+    return text ? { type: "assistant/message", text } : null;
+  }
+  if (/reasoning|thinking/i.test(messageEvent.type)) {
+    const text = firstTextValue(messageEvent, ["content", "text", "thinking", "reasoning"]);
+    return text ? { type: "assistant/reasoning", text: `[reasoning]\n${text}` } : null;
+  }
+  if (/tool/i.test(messageEvent.type)) {
+    const text = compactJson(messageEvent);
+    return text ? { type: "assistant/tool", text: `[assistant/tool]\n${text}` } : null;
+  }
+  return null;
+}
+
+function customDisplayItemFromEvent(event) {
+  if (event.type !== "message_end" || event.message?.role !== "custom") return null;
+  const message = event.message;
+  if (message.display === false) return null;
+  const customType = String(message.customType || "message");
+  const text = textFromPiContent(message.content) || firstTextValue(message, ["text", "details"]);
+  if (!text) return null;
+  const title = customDisplayTitle(message, customType);
+  return {
+    type: `custom/${customType}`,
+    text: formatCustomText(customType, text, title),
+  };
+}
+
+function toolDisplayItemFromEvent(event) {
+  if (event.type === "tool_execution_update") {
+    const customType = event.partialResult?.details?.customType;
+    const text = textFromPiContent(event.partialResult?.content) || firstTextValue(event.partialResult, ["text", "message"]);
+    if (customType && text) {
+      const title = customDisplayTitle(event.partialResult, customType);
+      return { type: `custom/${customType}`, text: formatCustomText(customType, text, title), toolCallId: event.toolCallId };
+    }
+  }
+  if (event.type === "tool_execution_end") {
+    const customType = event.result?.details?.customType;
+    const text = textFromPiContent(event.result?.content) || firstTextValue(event.result, ["text", "message"]);
+    if (customType && text) {
+      const title = customDisplayTitle(event.result, customType);
+      return { type: `custom/${customType}`, text: formatCustomText(customType, text, title), toolCallId: event.toolCallId };
+    }
+  }
+  if (event.type === "message_end" && /tool/i.test(String(event.message?.role || ""))) {
+    const name = String(event.message.toolName || event.message.name || "tool");
+    const text = textFromPiContent(event.message.content) || firstTextValue(event.message, ["text", "details"]) || compactJson(event.message);
+    return text ? { type: `tool/${name}`, text: `[tool/${name}]\n${text}` } : null;
+  }
+  if (/^tool/i.test(String(event.type || ""))) {
+    const name = String(event.toolName || event.name || event.tool?.name || "event");
+    const text = firstTextValue(event, ["content", "text", "message", "result", "error"]) || compactJson(event);
+    return text ? { type: `tool/${name}`, text: `[tool/${name}]\n${text}` } : null;
+  }
+  return null;
+}
+
+function textFromPiContent(content) {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (!part || typeof part !== "object") return "";
+      if (part.type === "text") return part.text || "";
+      if (part.text) return part.text;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function customDisplayTitle(message, customType) {
+  const details = message?.details;
+  return firstStringValue(
+    message,
+    ["telepiTitle", "title"],
+  ) || firstStringValue(
+    details && typeof details === "object" ? details : undefined,
+    ["telepiTitle", "title"],
+  ) || (customType === "message" ? "" : `custom/${customType}`);
+}
+
+function formatCustomText(customType, text, title) {
+  if (!title) return text;
+  return `${title}\n${text}`;
+}
+
+function firstStringValue(object, keys) {
+  for (const key of keys) {
+    const value = object?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function firstTextValue(object, keys) {
+  for (const key of keys) {
+    const value = object?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (value && typeof value === "object") {
+      const text = textFromPiContent(value);
+      if (text) return text;
+    }
+  }
+  return "";
+}
+
+function compactJson(value, maxLength = 1800) {
+  try {
+    const text = JSON.stringify(value);
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+  } catch {
+    return "";
+  }
+}
+
+function updateReplyAnchorFromPiEvent(active, event) {
+  if (event?.type !== "message_start" || event.message?.role !== "user") return;
+  const messageId = telegramMessageIdFromPiMessage(event.message);
+  if (messageId) active.currentReplyToMessageId = messageId;
+}
+
+function telegramMessageIdFromPiMessage(message) {
+  const text = (message.content || [])
+    .filter((part) => part?.type === "text")
+    .map((part) => part.text || "")
+    .join("\n");
+  const match = text.match(/^telegram_message_id=(.+)$/m);
+  return match?.[1]?.trim() || null;
+}
+
+function scheduleCancelButton(telegram, active) {
+  clearTimeout(active.cancelAttachTimer);
+  const generation = active.cancelGeneration;
+  active.cancelAttachTimer = setTimeout(() => {
+    const message = active.cancelMessage;
+    if (!message || active.cancelled || !active.abort) return;
+    telegram.editMessageReplyMarkup({
+      chatId: message.chatId,
+      messageId: message.messageId,
+      replyMarkup: cancelButtonMarkup(active.cancelToken),
+    }).then(() => {
+      if (active.cancelGeneration === generation && active.cancelMessage === message) {
+        active.cancelButtonAttached = true;
+      } else {
+        return clearTelegramMessageReplyMarkup(telegram, message).catch((error) => {
+          if (!isReplyMarkupAlreadyClear(error)) {
+            console.error(`clear stale attached cancel button failed chat=${message.chatId} message=${message.messageId}: ${error.message}`);
+          }
+        });
+      }
+    }).catch((error) => {
+      if (!isReplyMarkupAlreadyClear(error)) {
+        console.error(`attach cancel button failed chat=${message.chatId} message=${message.messageId}: ${error.message}`);
+      }
+    });
+  }, 900);
+}
+
+function cancelButtonMarkup(token) {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "Cancel",
+          callback_data: `telepi:cancel:${token}`,
+        },
+      ],
+    ],
+  };
+}
+
+async function clearCancelButton(telegram, active) {
+  active.cancelGeneration += 1;
+  clearTimeout(active.cancelAttachTimer);
+  active.cancelAttachTimer = undefined;
+  const message = active.cancelMessage;
+  active.cancelMessage = undefined;
+  active.cancelButtonAttached = false;
+  if (!message) return;
+  await clearTelegramMessageReplyMarkup(telegram, message).catch((error) => {
+    if (!isReplyMarkupAlreadyClear(error)) {
+      console.error(`clear cancel button failed chat=${message.chatId} message=${message.messageId}: ${error.message}`);
+    }
+  });
+}
+
+async function clearTelegramMessageReplyMarkup(telegram, message) {
+  await telegram.editMessageReplyMarkup({
+    chatId: message.chatId,
+    messageId: message.messageId,
+  });
+}
+
+async function removeCallbackMessageMarkup(telegram, query) {
+  if (!query.message?.chat?.id || !query.message?.message_id) return;
+  await telegram.editMessageReplyMarkup({
+    chatId: String(query.message.chat.id),
+    messageId: String(query.message.message_id),
+  });
+}
+
+function isReplyMarkupAlreadyClear(error) {
+  return /message is not modified/i.test(error.message);
+}
+
+async function handleCompactCommand(config, telegram, topic, envelope, instructions) {
+  const startedAt = Date.now();
+  const stopWorkingIndicator = startWorkingIndicator(config, telegram, topic, envelope);
+  try {
+    const result = await compactPiSession(config, topic, instructions);
+    const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    console.error(`compacted chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} duration=${durationSeconds}s`);
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: envelope.messageId,
+      text: `Compacted ${topic.name}.\n\nKept from entry: ${result.firstKeptEntryId}\nTokens before: ${result.tokensBefore}`,
+    });
+  } catch (error) {
+    const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    console.error(`compact failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} duration=${durationSeconds}s: ${error.stack || error.message}`);
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: envelope.messageId,
+      text: `Compact failed for ${topic.name}: ${error.message}`,
+    });
+  } finally {
+    stopWorkingIndicator();
+  }
+}
+
+function startWorkingIndicator(config, telegram, topic, envelope) {
+  if (config.telegram.working_indicator !== "typing") return () => undefined;
+
+  let stopped = false;
+  const sendTyping = () => {
+    if (stopped) return;
+    telegram.sendChatAction({
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      action: "typing",
+    }).catch((error) => {
+      console.error(`typing indicator failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.message}`);
+    });
+  };
+
+  sendTyping();
+  const burstTimer = setTimeout(sendTyping, 750);
+  const intervalMs = Math.min(2, Math.max(1, Number(config.telegram.typing_interval_seconds || 2))) * 1000;
+  const timer = setInterval(sendTyping, intervalMs);
+  return () => {
+    stopped = true;
+    clearTimeout(burstTimer);
+    clearInterval(timer);
+  };
+}
+
+async function sendLongMessage(telegram, message) {
+  const chunks = splitMessage(message.text);
+  const sentMessages = [];
+  for (const [index, chunk] of chunks.entries()) {
+    const converted = toTelegramMarkdownV2(chunk);
+    const payload = {
+      chatId: message.chatId,
+      topicId: message.topicId,
+      replyToMessageId: index === 0 ? message.replyToMessageId : undefined,
+      text: converted ?? chunk,
+      parseMode: converted ? "MarkdownV2" : undefined,
+      replyMarkup: index === chunks.length - 1 ? message.replyMarkup : undefined,
+    };
+    try {
+      sentMessages.push(await sendMessageWithRateLimitRetry(telegram, payload));
+    } catch (error) {
+      if (isTelegramRateLimited(error)) {
+        console.error(`send message rate limited after retries, dropping ${chunks.length - index} chunk(s) chat=${message.chatId} topic=${message.topicId}: ${error.message}`);
+        break;
+      } else if (payload.replyToMessageId && /reply|replied|message to be replied/i.test(error.message)) {
+        console.error(`reply target unavailable chat=${message.chatId} topic=${message.topicId} message=${payload.replyToMessageId}; retrying without reply`);
+        const sent = await sendTelegramMessageOrDropOnRateLimit(telegram, { ...payload, replyToMessageId: undefined }, message);
+        if (!sent) break;
+        sentMessages.push(sent);
+      } else if (payload.parseMode && /parse entities|can't parse entities|reserved and must be escaped/i.test(error.message)) {
+        // Converter gap — should be rare; the raw chunk is the fallback.
+        console.error(`MarkdownV2 parse failed after conversion chat=${message.chatId} topic=${message.topicId}; retrying as plain text: ${error.message}`);
+        const sent = await sendTelegramMessageOrDropOnRateLimit(telegram, { ...payload, parseMode: undefined, text: chunk }, message);
+        if (!sent) break;
+        sentMessages.push(sent);
+      } else {
+        throw error;
+      }
+    }
+  }
+  return sentMessages;
+}
+
+async function sendTelegramMessageOrDropOnRateLimit(telegram, payload, originalMessage) {
+  try {
+    return await sendMessageWithRateLimitRetry(telegram, payload);
+  } catch (error) {
+    if (isTelegramRateLimited(error)) {
+      console.error(`send message rate limited after retries chat=${originalMessage.chatId} topic=${originalMessage.topicId}: ${error.message}`);
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function sendMessageWithRateLimitRetry(telegram, payload, maxRetries = 3) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await telegram.sendMessage(payload);
+    } catch (error) {
+      const delayMs = rateLimitDelayMs(error);
+      if (delayMs == null || attempt >= maxRetries) throw error;
+      console.error(`send message rate limited chat=${payload.chatId} topic=${payload.topicId}; waiting ${delayMs}ms: ${error.message}`);
+      await sleep(delayMs);
+    }
+  }
+}
+
+function rateLimitDelayMs(error) {
+  if (!isTelegramRateLimited(error)) return null;
+  const seconds = Number(error.retryAfterSeconds ?? error.message.match(/retry after (\d+)/i)?.[1] ?? 5);
+  return Math.min(60, Math.max(1, seconds)) * 1000;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function editTelegramMessageText(telegram, message) {
+  const text = message.text.length > 3900 ? `${message.text.slice(0, 3890)}\n[truncated]` : message.text;
+  const converted = toTelegramMarkdownV2(text);
+  const payload = {
+    chatId: message.chatId,
+    messageId: message.messageId,
+    text: converted ?? text,
+    parseMode: converted ? "MarkdownV2" : undefined,
+    replyMarkup: message.replyMarkup,
+  };
+  try {
+    await telegram.editMessageText(payload);
+  } catch (error) {
+    if (payload.parseMode && /parse entities|can't parse entities|reserved and must be escaped/i.test(error.message)) {
+      try {
+        await telegram.editMessageText({ ...payload, parseMode: undefined, text });
+      } catch (plainError) {
+        if (isTelegramRateLimited(plainError)) {
+          console.error(`edit message rate limited chat=${message.chatId} message=${message.messageId}: ${plainError.message}`);
+          return;
+        }
+        throw plainError;
+      }
+    } else if (isTelegramRateLimited(error)) {
+      console.error(`edit message rate limited chat=${message.chatId} message=${message.messageId}: ${error.message}`);
+    } else if (!isReplyMarkupAlreadyClear(error)) {
+      throw error;
+    }
+  }
+}
+
+function isTelegramRateLimited(error) {
+  return /Too Many Requests|retry after/i.test(error.message || "");
+}
+
+function splitMessage(text, maxLength = 3900) {
+  if (text.length <= maxLength) return [text];
+  const chunks = [];
+  let rest = text;
+  while (rest.length > maxLength) {
+    let index = rest.lastIndexOf("\n\n", maxLength);
+    if (index < maxLength / 2) index = rest.lastIndexOf("\n", maxLength);
+    if (index < maxLength / 2) index = rest.lastIndexOf(" ", maxLength);
+    if (index < maxLength / 2) index = maxLength;
+    chunks.push(rest.slice(0, index).trim());
+    rest = rest.slice(index).trim();
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
+
+function isAllowedUser(config, userId) {
+  const allowed = config.telegram.allowed_user_ids || [];
+  if (!allowed.length || allowed.includes("*")) return true;
+  return userId != null && allowed.includes(String(userId));
+}
+
+main().catch((error) => {
+  console.error(error.stack || error.message);
+  process.exit(1);
+});

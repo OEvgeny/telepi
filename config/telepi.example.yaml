@@ -1,0 +1,46 @@
+version: 1
+telegram:
+  bot_token_env: TELEPI_BOT_TOKEN
+  allowed_user_ids:
+    - "111111111"
+  poll_timeout_seconds: 25
+  poll_limit: 50
+  working_indicator: typing
+  typing_interval_seconds: 4
+users:
+  owner: Alice
+  aliases:
+    Alice:
+      id: "111111111"
+      alias: Alice
+project:
+  root: .
+  entities_dir: entities
+  sessions_dir: .telepi/pi-sessions
+  cache_dir: .telepi/cache
+  extensions:
+    - extensions/telepi-telegram.ts
+    - extensions/telepi-buttons.ts
+manager:
+  agent: helper
+  chat_id: "111111111"
+  topic_id: null
+agents:
+  helper:
+    name: Helper
+    entity_dir: entities/helper
+    session_id: helper-main
+    skills: []
+    extensions: []
+    branding:
+      color: blue
+      style: assistant
+      avatar: 🤖
+topics:
+  - chat_id: "111111111"
+    topic_id: "2"
+    name: Helper
+    agent: helper
+    model: openai/gpt-5
+    session_id: helper-main
+    enabled: true

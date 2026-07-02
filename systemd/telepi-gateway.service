@@ -1,0 +1,19 @@
+[Unit]
+Description=Telepi Telegram topic gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/telepi
+Environment=TELEPI_CONFIG=%h/telepi/config/telepi.yaml
+EnvironmentFile=-%h/telepi/.env
+ExecStart=/usr/bin/env npm run gateway
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telepi-gateway
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,28 @@
+{
+  "name": "telepi",
+  "version": "0.1.0",
+  "description": "Telegram topic gateway and manager CLI for pi agents",
+  "type": "module",
+  "bin": {
+    "telepi": "./bin/telepi.js"
+  },
+  "scripts": {
+    "check": "node --check bin/telepi.js && node --check src/gateway.js && node --check src/config.js && node --check src/telegram.js && node --check src/pi-session.js && node --check src/pi-compact.js && node --check extensions/telepi-telegram.ts && node --check extensions/telepi-buttons.ts",
+    "gateway": "node src/gateway.js",
+    "telepi": "node bin/telepi.js"
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "yaml": "^2.9.0"
+  },
+  "keywords": [
+    "telegram",
+    "pi",
+    "agent"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}
