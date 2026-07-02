@@ -20,7 +20,6 @@ project:
   cache_dir: .telepi/cache
   extensions:
     - extensions/telepi-telegram.ts
-    - extensions/telepi-buttons.ts
 manager:
   agent: helper
   chat_id: "111111111"

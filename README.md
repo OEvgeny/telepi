@@ -125,7 +125,7 @@ The gateway loads `extensions/telepi-telegram.ts` for each routed session and pa
 
 ## Inline Buttons
 
-`extensions/telepi-buttons.ts` registers `telepi_buttons(text, buttons)` for agents that should offer tappable choices:
+`extensions/telepi-telegram.ts` also registers `telepi_buttons(text, buttons)` for agents that should offer tappable choices:
 
 - `buttons` is a flat list of up to 24 entries; rows are laid out automatically.
 - Each entry is a plain string (label doubles as the payload), `{label, data}` when the routed-back payload should differ, or `{label, url}` for link buttons.
