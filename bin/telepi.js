@@ -388,10 +388,20 @@ program
     const config = load();
     const topic = findTopicByName(config, options.topic);
     if (!topic) throwCli(`unknown topic mapping: ${options.topic}`);
-    const result = await compactPiSession(config, topic, options.instructions, {
-      model: options.model,
-      keepRecentTokens: options.keepRecent,
-    });
+    let result;
+    try {
+      result = await compactPiSession(config, topic, options.instructions, {
+        model: options.model,
+        keepRecentTokens: options.keepRecent,
+      });
+    } catch (error) {
+      // Nothing new since the last compaction — a no-op, not a failure (timers rerun this nightly).
+      if (/Already compacted|too small/i.test(error.message)) {
+        console.log(`skipped ${topic.name} (${topic.session_id}): ${error.message}`);
+        return;
+      }
+      throw error;
+    }
     console.log(`compacted ${topic.name} (${topic.session_id}): tokensBefore=${result?.tokensBefore ?? "?"}`);
   });
 
