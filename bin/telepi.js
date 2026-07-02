@@ -381,13 +381,17 @@ program
   .description("Compact a topic's pi session transcript in place")
   .requiredOption("--topic <name>", "Existing topic mapping name")
   .option("--instructions <text>", "Custom compaction instructions")
-  .option("--model <provider/model>", "Model to run the compaction with; defaults to the session's model")
+  .option("--model <provider/model>", "Model to run the compaction with; defaults to the topic's configured model")
+  .option("--keep-recent <tokens>", "How many recent tokens to keep uncompacted (default 20000)")
   .action(async (options) => {
     const { compactPiSession } = await import("../src/pi-compact.js");
     const config = load();
     const topic = findTopicByName(config, options.topic);
     if (!topic) throwCli(`unknown topic mapping: ${options.topic}`);
-    const result = await compactPiSession(config, topic, options.instructions, { model: options.model });
+    const result = await compactPiSession(config, topic, options.instructions, {
+      model: options.model,
+      keepRecentTokens: options.keepRecent,
+    });
     console.log(`compacted ${topic.name} (${topic.session_id}): tokensBefore=${result?.tokensBefore ?? "?"}`);
   });
 

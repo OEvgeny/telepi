@@ -151,6 +151,15 @@ export function getAgent(config, agentId) {
   return agent;
 }
 
+// Topics without their own model override inherit from the agent's main topic
+// (the topic named after the agent), so each agent's model is set in one place.
+export function resolveTopicModel(config, topic, agent) {
+  if (topic.model) return topic.model;
+  const mainName = agent.name || topic.agent;
+  const mainTopic = (config.topics || []).find((entry) => entry.agent === topic.agent && entry.name === mainName);
+  return mainTopic?.model;
+}
+
 export function resolveEntityDir(config, agent) {
   const entityDir = agent.entity_dir || join("entities", agent.name || "agent");
   return resolvePath(config.project.root, entityDir);

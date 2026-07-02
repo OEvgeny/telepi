@@ -3,7 +3,7 @@ import { mkdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
-import { getAgent, getBotToken, resolveEntityDir, resolvePath } from "./config.js";
+import { getAgent, getBotToken, resolveEntityDir, resolvePath, resolveTopicModel } from "./config.js";
 
 export async function runPiForTopic(config, topic, envelope, options = {}) {
   const run = await startPiForTopic(config, topic, envelope, options);
@@ -57,15 +57,6 @@ export async function startPiForTopic(config, topic, envelope, options = {}) {
     initialMessage: formatTelegramMessage(topic, withAliasName(config, envelope)),
     steerMessage: (steerEnvelope) => formatTelegramMessage(topic, withAliasName(config, steerEnvelope)),
   });
-}
-
-// Topics without their own model override inherit from the agent's main topic
-// (the topic named after the agent), so each agent's model is set in one place.
-function resolveTopicModel(config, topic, agent) {
-  if (topic.model) return topic.model;
-  const mainName = agent.name || topic.agent;
-  const mainTopic = (config.topics || []).find((entry) => entry.agent === topic.agent && entry.name === mainName);
-  return mainTopic?.model;
 }
 
 // Agents should always see one stable name per person, regardless of the

@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { getAgent, resolveEntityDir } from "./config.js";
+import { getAgent, resolveEntityDir, resolveTopicModel } from "./config.js";
 
 let piModulePromise;
 
@@ -15,12 +15,14 @@ export async function compactPiSession(config, topic, instructions, options = {}
     throw new Error(`No session file found for ${topic.name} (${sessionId})`);
   }
 
-  const { createAgentSession, SessionManager } = await loadPiModule();
+  const { createAgentSession, SessionManager, SettingsManager } = await loadPiModule();
   const sessionManager = SessionManager.open(sessionFile, config.project.sessions_dir, entityDir);
+  const modelSpec = options.model || resolveTopicModel(config, topic, agent);
   const { session } = await createAgentSession({
     cwd: entityDir,
     sessionManager,
-    model: options.model ? await resolveModel(options.model) : undefined,
+    model: modelSpec ? await resolveModel(modelSpec) : undefined,
+    settingsManager: buildSettingsManager(SettingsManager, entityDir, options.keepRecentTokens),
   });
   try {
     return await session.compact(instructions || undefined);
@@ -33,6 +35,21 @@ export function parseCompactCommand(text) {
   const match = String(text || "").match(/^\/compact(?:@\S+)?(?:\s+([\s\S]*))?$/i);
   if (!match) return null;
   return (match[1] || "").trim();
+}
+
+// The entity's own .pi/settings.json still applies; keepRecentTokens (how many
+// recent tokens survive compaction uncompacted) is layered on top when given.
+function buildSettingsManager(SettingsManager, entityDir, keepRecentTokens) {
+  if (!keepRecentTokens) return undefined;
+  let entitySettings = {};
+  const settingsPath = join(entityDir, ".pi", "settings.json");
+  if (existsSync(settingsPath)) {
+    entitySettings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  }
+  return SettingsManager.inMemory({
+    ...entitySettings,
+    compaction: { ...entitySettings.compaction, keepRecentTokens: Number(keepRecentTokens) },
+  });
 }
 
 async function resolveModel(spec) {
