@@ -5,3 +5,4 @@ entities/
 npm-debug.log*
 skills/
 config/telepi.yaml
+timers/
