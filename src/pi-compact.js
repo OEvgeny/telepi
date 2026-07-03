@@ -6,6 +6,28 @@ import { getAgent, resolveEntityDir, resolveTopicModel } from "./config.js";
 
 let piModulePromise;
 
+// Skills, AGENTS.md, and other files read during a session leave stale copies
+// in the transcript, and a default compaction bakes their contents into the
+// summary as facts. The instructions keep file-sourced facts out of the
+// summary; the post-compaction notice makes the agent re-read files instead
+// of trusting pre-compaction memory. Together a compacted session behaves
+// like a fresh one with preserved conversational context. (Verified against
+// the local model: instructions alone are not enough — the notice is the
+// load-bearing part.)
+const FRESHNESS_INSTRUCTIONS =
+  "Do NOT copy facts, rules, or instructions that came from skill files, AGENTS.md, " +
+  "or other documentation files into the summary. Those files may change on disk " +
+  "and will be re-read; instead, list which skills/files were consulted and for " +
+  "what purpose. Only preserve facts produced by the conversation itself " +
+  "(user decisions, work performed, results).";
+
+const COMPACTION_NOTICE =
+  "This session was just compacted. Any skill files, AGENTS.md, or other files read " +
+  "earlier may have changed on disk since — the summary above intentionally omits " +
+  "their contents. Do not answer from remembered file contents or from answers you " +
+  "gave before compaction: re-read the relevant skill/file before relying on facts " +
+  "that came from one.";
+
 export async function compactPiSession(config, topic, instructions, options = {}) {
   const agent = getAgent(config, topic.agent);
   const entityDir = resolveEntityDir(config, agent);
@@ -24,8 +46,16 @@ export async function compactPiSession(config, topic, instructions, options = {}
     model: modelSpec ? await resolveModel(modelSpec) : undefined,
     settingsManager: buildSettingsManager(SettingsManager, entityDir, options.keepRecentTokens),
   });
+  const combinedInstructions = instructions
+    ? `${instructions}\n\n${FRESHNESS_INSTRUCTIONS}`
+    : FRESHNESS_INSTRUCTIONS;
   try {
-    return await session.compact(instructions || undefined);
+    const result = await session.compact(combinedInstructions);
+    sessionManager.appendCustomMessageEntry("telepi-compaction-notice", [
+      { type: "text", text: COMPACTION_NOTICE },
+    ], false);
+    sessionManager.flush?.();
+    return result;
   } finally {
     session.dispose?.();
   }
