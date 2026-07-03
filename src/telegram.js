@@ -93,6 +93,14 @@ export class TelegramClient {
     }));
   }
 
+  async setMessageReaction({ chatId, messageId, emoji }) {
+    return this.request("setMessageReaction", {
+      chat_id: chatId,
+      message_id: messageId,
+      reaction: emoji ? [{ type: "emoji", emoji }] : [],
+    });
+  }
+
   async sendPhoto({ chatId, topicId, filePath, caption, replyToMessageId }) {
     const form = new FormData();
     form.set("chat_id", String(chatId));
@@ -278,6 +286,9 @@ export async function hydrateEnvelopeMedia(telegram, config, envelope) {
 
   return {
     ...envelope,
+    // Consumed: hydrating an already-hydrated envelope (e.g. a queued
+    // message replayed after a run finishes) must not re-download media.
+    telegramAttachments: [],
     attachments: [
       ...(envelope.attachments || []),
       ...attachments,

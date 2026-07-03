@@ -68,17 +68,13 @@ async function main() {
       const key = `${envelope.chatId}:${envelope.topicId}`;
       const active = inFlight.get(key);
       if (active) {
-        steerRunningTopic(configForMessage, telegram, topic, envelope, active).catch((error) => {
+        steerRunningTopic(configForMessage, telegram, inFlight, topic, envelope, active).catch((error) => {
           console.error(`steering dispatch failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
         });
         continue;
       }
 
-      const run = startTopicMessage(configForMessage, telegram, topic, envelope);
-      inFlight.set(key, run);
-      run.promise.finally(() => {
-        if (inFlight.get(key) === run) inFlight.delete(key);
-      });
+      dispatchTopicRun(configForMessage, telegram, inFlight, topic, envelope);
     }
   }
 }
@@ -175,6 +171,8 @@ function startTopicMessage(config, telegram, topic, envelope) {
     displayedMessageCount: 0,
     telegramDeliveryCount: 0,
     lastModelError: undefined,
+    pending: [],
+    pendingDrained: false,
     displayQueue: Promise.resolve(),
     toolDisplayMessages: new Map(),
     ready: undefined,
@@ -213,7 +211,58 @@ function startTopicMessage(config, telegram, topic, envelope) {
   return run;
 }
 
-async function steerRunningTopic(config, telegram, topic, envelope, active) {
+// Starts a run for an envelope, registers it in inFlight, and when it
+// finishes dispatches any messages that queued up while it was unsteerable.
+function dispatchTopicRun(config, telegram, inFlight, topic, envelope, pending = []) {
+  const key = `${envelope.chatId}:${envelope.topicId}`;
+  const run = startTopicMessage(config, telegram, topic, envelope);
+  run.pending.push(...pending);
+  inFlight.set(key, run);
+  run.promise.finally(() => {
+    if (inFlight.get(key) === run) inFlight.delete(key);
+    drainPendingEnvelopes(config, telegram, inFlight, topic, run);
+  });
+  return run;
+}
+
+function drainPendingEnvelopes(config, telegram, inFlight, topic, run) {
+  run.pendingDrained = true;
+  if (!run.pending.length) return;
+  const queued = run.pending.splice(0);
+  const key = `${queued[0].chatId}:${queued[0].topicId}`;
+  const active = inFlight.get(key);
+  if (active && active !== run) {
+    // A newer run already took the slot; hand it the queue.
+    active.pending.push(...queued);
+    return;
+  }
+  const [next, ...rest] = queued;
+  console.error(`dispatching queued message chat=${next.chatId} topic=${next.topicId} agent=${topic.agent} message=${next.messageId} remaining=${rest.length}`);
+  dispatchTopicRun(config, telegram, inFlight, topic, next, rest);
+}
+
+// Messages that arrive while the run can't be steered (compaction, the
+// cleanup window after agent_end) are queued and replayed as regular
+// messages once the run finishes. The 👀 reaction tells the user their
+// message was heard and will be answered later.
+async function queueEnvelopeForRun(config, telegram, inFlight, topic, run, envelope) {
+  run.pending.push(envelope);
+  console.error(`queued message chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${envelope.messageId}`);
+  if (run.pendingDrained) {
+    // The run finished while we were queueing; drain again so the message
+    // isn't stranded on a dead run object.
+    drainPendingEnvelopes(config, telegram, inFlight, topic, run);
+  }
+  await telegram.setMessageReaction({
+    chatId: envelope.chatId,
+    messageId: envelope.messageId,
+    emoji: "👀",
+  }).catch((error) => {
+    console.error(`queued-message reaction failed chat=${envelope.chatId} message=${envelope.messageId}: ${error.message}`);
+  });
+}
+
+async function steerRunningTopic(config, telegram, inFlight, topic, envelope, active) {
   const compactInstructions = parseCompactCommand(envelope.text);
   if (compactInstructions !== null) {
     await sendLongMessage(telegram, {
@@ -238,15 +287,8 @@ async function steerRunningTopic(config, telegram, topic, envelope, active) {
     await active.steer(hydratedEnvelope);
     console.error(`steered chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${envelope.messageId}`);
   } catch (error) {
-    console.error(`steering failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
-    await sendLongMessage(telegram, {
-      chatId: envelope.chatId,
-      topicId: envelope.topicId,
-      replyToMessageId: envelope.messageId,
-      text: `Steering failed for ${topic.name}: ${error.message}`,
-    }).catch((sendError) => {
-      console.error(`steering failure response failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${sendError.message}`);
-    });
+    console.error(`steering unavailable chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.message}`);
+    await queueEnvelopeForRun(config, telegram, inFlight, topic, active, hydratedEnvelope);
   }
 }
 
@@ -457,15 +499,11 @@ async function handleButtonCallback(config, telegram, inFlight, query, buttonRef
   const active = inFlight.get(key);
   if (active) {
     await answered;
-    await steerRunningTopic(config, telegram, topic, envelope, active);
+    await steerRunningTopic(config, telegram, inFlight, topic, envelope, active);
     return;
   }
 
-  const run = startTopicMessage(config, telegram, topic, envelope);
-  inFlight.set(key, run);
-  run.promise.finally(() => {
-    if (inFlight.get(key) === run) inFlight.delete(key);
-  });
+  dispatchTopicRun(config, telegram, inFlight, topic, envelope);
   await answered;
 }
 
