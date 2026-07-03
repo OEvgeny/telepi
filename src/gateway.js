@@ -7,6 +7,9 @@ import { TelegramClient, hydrateEnvelopeMedia, updateToEnvelope } from "./telegr
 import { compactPiSession, parseCompactCommand } from "./pi-compact.js";
 import { startPiForTopic } from "./pi-session.js";
 import { toTelegramMarkdownV2 } from "./telegram-format.js";
+import { installTimestampedConsole } from "./logging.js";
+
+installTimestampedConsole();
 
 const configPath = process.argv.includes("--config")
   ? process.argv[process.argv.indexOf("--config") + 1]
