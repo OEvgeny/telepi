@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { readConfig, getBotToken, findTopic } from "./config.js";
 import { TelegramClient, hydrateEnvelopeMedia, updateToEnvelope } from "./telegram.js";
@@ -17,6 +17,7 @@ const configPath = process.argv.includes("--config")
 
 async function main() {
   let config = readConfig(configPath);
+  initSentMessageIndex(config);
   const telegram = new TelegramClient(getBotToken(config));
   const me = await telegram.getMe();
   await configureBotCommands(telegram, config);
@@ -49,6 +50,12 @@ async function main() {
       if (update.callback_query) {
         handleCallbackQuery(config, telegram, inFlight, update.callback_query).catch((error) => {
           console.error(`callback handling failed: ${error.stack || error.message}`);
+        });
+        continue;
+      }
+      if (update.message_reaction) {
+        handleMessageReaction(config, telegram, inFlight, update.message_reaction).catch((error) => {
+          console.error(`reaction handling failed: ${error.stack || error.message}`);
         });
         continue;
       }
@@ -1026,6 +1033,89 @@ function startWorkingIndicator(config, telegram, topic, envelope) {
   };
 }
 
+// Reaction updates carry only chat_id + message_id (no topic), so the gateway
+// keeps a rolling index of the messages it sent to route reactions back to
+// the owning topic. Survives restarts; pruned at startup.
+let sentMessageIndexPath;
+
+function initSentMessageIndex(config) {
+  sentMessageIndexPath = resolve(config.project.cache_dir, "sent-messages.jsonl");
+  mkdirSync(resolve(config.project.cache_dir), { recursive: true });
+  if (!existsSync(sentMessageIndexPath)) return;
+  const lines = readFileSync(sentMessageIndexPath, "utf8").split("\n").filter(Boolean);
+  if (lines.length > 4000) {
+    writeFileSync(sentMessageIndexPath, lines.slice(-2000).join("\n") + "\n");
+  }
+}
+
+function recordSentMessages(message, sentMessages) {
+  if (!sentMessageIndexPath) return;
+  for (const sent of sentMessages) {
+    if (!sent?.message_id) continue;
+    appendFileSync(sentMessageIndexPath, JSON.stringify({
+      chat_id: String(sent.chat?.id || message.chatId),
+      message_id: String(sent.message_id),
+      topic_id: message.topicId == null ? null : String(message.topicId),
+      text: String(sent.text || message.text || "").slice(0, 150),
+    }) + "\n");
+  }
+}
+
+function findSentMessageRecord(chatId, messageId) {
+  if (!sentMessageIndexPath || !existsSync(sentMessageIndexPath)) return null;
+  const lines = readFileSync(sentMessageIndexPath, "utf8").split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i]) continue;
+    try {
+      const record = JSON.parse(lines[i]);
+      if (record.chat_id === String(chatId) && record.message_id === String(messageId)) return record;
+    } catch { /* skip corrupt line */ }
+  }
+  return null;
+}
+
+function reactionEmojis(reactions) {
+  return (reactions || []).map((r) => r.emoji || r.custom_emoji_id || "?");
+}
+
+async function handleMessageReaction(config, telegram, inFlight, reaction) {
+  const userId = String(reaction.user?.id || "");
+  if (!isAllowedUser(config, userId)) return;
+  const chatId = String(reaction.chat.id);
+  const messageId = String(reaction.message_id);
+  const record = findSentMessageRecord(chatId, messageId);
+  if (!record) {
+    console.error(`ignored reaction to unindexed message chat=${chatId} message=${messageId}`);
+    return;
+  }
+  const topic = findTopic(config, chatId, record.topic_id);
+  if (!topic || topic.enabled === false) return;
+  const oldEmojis = reactionEmojis(reaction.old_reaction);
+  const newEmojis = reactionEmojis(reaction.new_reaction);
+  const added = newEmojis.filter((e) => !oldEmojis.includes(e));
+  const removed = oldEmojis.filter((e) => !newEmojis.includes(e));
+  if (!added.length && !removed.length) return;
+  const parts = [];
+  if (added.length) parts.push(`reacted ${added.join(" ")}`);
+  if (removed.length) parts.push(`removed the ${removed.join(" ")} reaction`);
+  const envelope = {
+    chatId,
+    topicId: record.topic_id,
+    messageId,
+    userId,
+    userName: reaction.user?.first_name || "user",
+    text: `[Telegram reaction] The user ${parts.join(" and ")} on your earlier message${record.text ? `: "${record.text}"` : ""}. A reaction is a lightweight gesture — usually it needs at most a short acknowledgment or a reaction back, and often no reply at all beyond a word.`,
+  };
+  console.error(`reaction chat=${chatId} topic=${record.topic_id} message=${messageId} ${parts.join("; ")}`);
+  const key = `${chatId}:${record.topic_id}`;
+  const active = inFlight.get(key);
+  if (active) {
+    await steerRunningTopic(config, telegram, inFlight, topic, envelope, active);
+    return;
+  }
+  dispatchTopicRun(config, telegram, inFlight, topic, envelope);
+}
+
 async function sendLongMessage(telegram, message) {
   const chunks = splitMessage(message.text);
   const sentMessages = [];
@@ -1061,6 +1151,7 @@ async function sendLongMessage(telegram, message) {
       }
     }
   }
+  recordSentMessages(message, sentMessages);
   return sentMessages;
 }
 

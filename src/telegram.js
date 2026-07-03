@@ -38,7 +38,7 @@ export class TelegramClient {
       offset,
       timeout: timeoutSeconds,
       limit,
-      allowed_updates: ["message", "edited_message", "callback_query"],
+      allowed_updates: ["message", "edited_message", "callback_query", "message_reaction"],
     });
   }
 
