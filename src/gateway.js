@@ -170,6 +170,8 @@ function startTopicMessage(config, telegram, topic, envelope) {
     cancelGeneration: 0,
     currentReplyToMessageId: envelope.messageId,
     displayedMessageCount: 0,
+    telegramDeliveryCount: 0,
+    lastModelError: undefined,
     displayQueue: Promise.resolve(),
     toolDisplayMessages: new Map(),
     ready: undefined,
@@ -266,6 +268,9 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
         : undefined,
       onEvent: (event) => {
         updateReplyAnchorFromPiEvent(active, event);
+        if (isTelegramDeliveryEvent(event)) active.telegramDeliveryCount += 1;
+        const modelError = modelErrorFromPiEvent(event);
+        if (modelError) active.lastModelError = modelError;
         if (!useDefaultAssistantDisplay) {
           queueDisplayPiEvent(config, telegram, active, envelope, event, displayMessages);
         }
@@ -298,7 +303,21 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
     });
     return;
   }
-  if (result.ok && (result.streamedTextCount > 0 || active.displayedMessageCount > 0)) return;
+  // A turn that died on a model/API error must say so — silence or a
+  // "completed without output" placeholder hides real failures (stalled
+  // inference, timeouts) from the user.
+  if (result.ok && active.lastModelError) {
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
+      text: `⚠️ ${topic.agent} hit a model error: ${active.lastModelError}`,
+    });
+    return;
+  }
+  // A turn that delivered its output through a tool (photo, buttons, …) is
+  // not "without output" — suppress the placeholder for those.
+  if (result.ok && (result.streamedTextCount > 0 || active.displayedMessageCount > 0 || active.telegramDeliveryCount > 0)) return;
   const output = result.stdout || result.stderr;
   const text = result.ok
     ? (output || `${topic.agent} completed without output.`)
@@ -405,6 +424,14 @@ async function handleButtonCallback(config, telegram, inFlight, query, buttonRef
     return;
   }
 
+  // Action buttons are handled by the gateway itself (the agent may be
+  // blocked mid-turn, e.g. cancelling one of several running generations) —
+  // they never route back to the model as a user message.
+  if (callback.action) {
+    await handleButtonAction(telegram, query, callback);
+    return;
+  }
+
   // Ack without awaiting so the inFlight check/registration below stays
   // synchronous; otherwise concurrent clicks could start duplicate runs.
   const answered = telegram.answerCallbackQuery({
@@ -413,10 +440,14 @@ async function handleButtonCallback(config, telegram, inFlight, query, buttonRef
   }).catch((error) => {
     console.error(`answer button callback failed: ${error.message}`);
   });
-  // Buttons are one-shot: drop the keyboard so the choice can't be re-tapped.
-  removeCallbackMessageMarkup(telegram, query).catch((error) => {
-    console.error(`remove tapped button markup failed: ${error.message}`);
-  });
+  // Buttons are one-shot by default: drop the keyboard so the choice can't
+  // be re-tapped. Records marked sticky keep theirs (e.g. an image
+  // agent's Details/Regenerate/upscale buttons stay usable across taps).
+  if (!callback.sticky) {
+    removeCallbackMessageMarkup(telegram, query).catch((error) => {
+      console.error(`remove tapped button markup failed: ${error.message}`);
+    });
+  }
 
   const envelope = envelopeFromButtonCallback(query, callback);
   const key = `${envelope.chatId}:${envelope.topicId}`;
@@ -433,6 +464,56 @@ async function handleButtonCallback(config, telegram, inFlight, query, buttonRef
     if (inFlight.get(key) === run) inFlight.delete(key);
   });
   await answered;
+}
+
+async function handleButtonAction(telegram, query, callback) {
+  const action = callback.action || {};
+  try {
+    if (action.type === "answer") {
+      // Informational popup; keep the keyboard so it can be tapped again.
+      await telegram.answerCallbackQuery({
+        callbackQueryId: query.id,
+        text: String(action.text || "").slice(0, 190),
+        showAlert: true,
+      });
+      return;
+    }
+    if (action.type === "comfy-cancel") {
+      const base = String(action.base_url || "").replace(/\/+$/, "");
+      const promptId = String(action.prompt_id || "");
+      if (!/^https?:\/\//.test(base) || !promptId) throw new Error("malformed cancel action");
+      const queueResponse = await fetch(`${base}/queue`);
+      if (!queueResponse.ok) throw new Error(`queue check failed: HTTP ${queueResponse.status}`);
+      const queue = await queueResponse.json();
+      const inList = (list) => Array.isArray(list) && list.some((item) => item?.[1] === promptId);
+      let answer;
+      if (inList(queue.queue_running)) {
+        await fetch(`${base}/interrupt`, { method: "POST" });
+        answer = "Interrupting…";
+      } else if (inList(queue.queue_pending)) {
+        await fetch(`${base}/queue`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ delete: [promptId] }),
+        });
+        answer = "Removed from queue";
+      } else {
+        answer = "Already finished";
+      }
+      await telegram.answerCallbackQuery({ callbackQueryId: query.id, text: answer });
+      await removeCallbackMessageMarkup(telegram, query).catch(() => {});
+      console.error(`comfy-cancel prompt=${promptId}: ${answer}`);
+      return;
+    }
+    throw new Error(`unknown button action type: ${action.type}`);
+  } catch (error) {
+    console.error(`button action failed: ${error.stack || error.message}`);
+    await telegram.answerCallbackQuery({
+      callbackQueryId: query.id,
+      text: `Action failed: ${error.message}`.slice(0, 190),
+      showAlert: true,
+    }).catch(() => {});
+  }
 }
 
 function parseCancelCallbackData(data) {
@@ -469,6 +550,8 @@ function normalizeButtonCallback(record, index) {
     message_id: record.message_id == null ? "" : String(record.message_id),
     label: button.label == null ? "" : String(button.label),
     data: button.data == null ? "" : String(button.data),
+    action: button.action && typeof button.action === "object" ? button.action : null,
+    sticky: record.sticky === true,
   };
 }
 
@@ -599,6 +682,27 @@ function isDisplayMessageAllowed(displayMessages, type) {
   if (values.includes(type)) return true;
   const category = type.split("/")[0];
   return values.includes(category);
+}
+
+// Tool results that carry Telegram message ids prove the tool already
+// delivered user-visible output (telepi_send_image, telepi_buttons, agent
+// extensions like an image generator's generate_image).
+// An assistant message that ended with stopReason "error" carries the real
+// failure (e.g. "Request timed out." from a stalled model server). Cancels
+// (stopReason "aborted") are not errors and are handled separately.
+function modelErrorFromPiEvent(event) {
+  if (event?.type !== "message_end") return null;
+  const message = event.message;
+  if (message?.role !== "assistant" || message.stopReason !== "error") return null;
+  return String(message.errorMessage || "unknown model error");
+}
+
+function isTelegramDeliveryEvent(event) {
+  if (event?.type !== "tool_execution_end") return false;
+  const details = event.result?.details;
+  if (!details || typeof details !== "object") return false;
+  if (details.message_id) return true;
+  return Array.isArray(details.telegram_messages) && details.telegram_messages.some((entry) => entry?.messageId || entry?.message_id);
 }
 
 function displayItemsFromPiEvent(event) {
