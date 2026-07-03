@@ -72,6 +72,7 @@ function formatTelegramMessage(topic, envelope) {
 
   const routing = [
     `Telegram topic route: ${topic.name}`,
+    `local_time=${formatLocalTime(new Date())}`,
     `chat_id=${envelope.chatId}`,
     `topic_id=${envelope.topicId}`,
     `telegram_user_id=${envelope.userId || "unknown"}`,
@@ -90,6 +91,14 @@ function formatTelegramMessage(topic, envelope) {
   }
 
   return `${routing.join("\n")}\n\n${userText}`;
+}
+
+// Models have no clock; anything time-aware (scheduling, "how long since",
+// greetings) needs the current time in context.
+function formatLocalTime(d) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const day = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()];
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())} (${day})`;
 }
 
 function formatReplyContext(replyTo) {
