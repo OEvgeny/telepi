@@ -6,7 +6,7 @@ The gateway watches Telegram bot updates, extracts `chat_id` and `message_thread
 
 ## Setup
 
-1. Create a Telegram bot with [@BotFather](https://t.me/BotFather) and add it to a forum-enabled group with topics.
+1. Create a Telegram bot with [@BotFather](https://t.me/BotFather) and add it to a Telegram group with topics enabled.
 2. Copy `.env.example` to `.env` and set `TELEPI_BOT_TOKEN`.
 3. Copy `config/telepi.example.yaml` to `config/telepi.yaml` and adjust; after that, manage it only through the `telepi` CLI.
 4. `npm install`
