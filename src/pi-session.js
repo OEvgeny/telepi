@@ -78,6 +78,7 @@ function formatTelegramMessage(topic, envelope) {
     `telegram_user_id=${envelope.userId || "unknown"}`,
     `telegram_user_name=${envelope.userName}`,
     `telegram_message_id=${envelope.messageId}`,
+    ...(envelope.source ? [`telepi_message_source=${envelope.source}`] : []),
     ...(envelope.replyTo ? ["", "Telegram reply context:", ...formatReplyContext(envelope.replyTo)] : []),
     ...(envelope.attachments?.length
       ? ["", "Attachments (use the read tool on the path to view the content):", ...envelope.attachments.map(formatAttachment)]

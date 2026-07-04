@@ -81,7 +81,7 @@ npm run telepi -- session:compact --topic Helper [--instructions "..."] [--model
 Send a prompt into a topic from the command line (used by timers and scripts):
 
 ```bash
-npm run telepi -- topic:prompt --topic Helper --text "..." [--no-echo]
+npm run telepi -- topic:prompt --topic Helper --text "..." [--no-echo] [--from "Name"] [--source "provenance"]
 ```
 
 Run the gateway:

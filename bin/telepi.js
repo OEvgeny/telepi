@@ -304,6 +304,7 @@ program
   .option("--stdin", "Read prompt text from stdin")
   .option("--no-echo", "Do not post the prompt into Telegram before running pi")
   .option("--from <name>", "Sender name the agent sees in the routing header; defaults to the topic owner")
+  .option("--source <text>", "Source/provenance line the agent sees in the routing header")
   .action(async (options) => {
     const config = load();
     const topic = resolvePromptTopic(config, options);
@@ -335,6 +336,7 @@ program
       userId: owner?.id || "telepi-cli",
       userName: options.from || owner?.alias || "telepi-cli",
       messageId: promptMessageId,
+      source: options.source || "",
       text,
       attachments: [],
     };
