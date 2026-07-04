@@ -303,6 +303,7 @@ program
   .option("--text <text>", "Prompt text")
   .option("--stdin", "Read prompt text from stdin")
   .option("--no-echo", "Do not post the prompt into Telegram before running pi")
+  .option("--from <name>", "Sender name the agent sees in the routing header; defaults to the topic owner")
   .action(async (options) => {
     const config = load();
     const topic = resolvePromptTopic(config, options);
@@ -322,15 +323,17 @@ program
       console.log(`sent prompt to ${topic.name}: message=${promptMessageId}`);
     }
 
-    // Timer/CLI prompts run on behalf of the topic owner, so agents see the
-    // same identity as when the owner writes in Telegram.
-    const owner = resolveUser(config, topic.owner);
+    // Timer/CLI prompts run on behalf of the topic owner by default, so
+    // agents see the same identity as when the owner writes in Telegram.
+    // --from overrides this for self-messages and system prompts, so an
+    // agent's own machinery isn't mistaken for the owner speaking.
+    const owner = options.from ? null : resolveUser(config, topic.owner);
     const envelope = {
       updateId: `cli:${Date.now()}`,
       chatId: String(topic.chat_id),
       topicId: topic.topic_id == null ? null : String(topic.topic_id),
       userId: owner?.id || "telepi-cli",
-      userName: owner?.alias || "telepi-cli",
+      userName: options.from || owner?.alias || "telepi-cli",
       messageId: promptMessageId,
       text,
       attachments: [],
