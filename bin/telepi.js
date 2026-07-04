@@ -324,10 +324,6 @@ program
       console.log(`sent prompt to ${topic.name}: message=${promptMessageId}`);
     }
 
-    // Timer/CLI prompts run on behalf of the topic owner by default, so
-    // agents see the same identity as when the owner writes in Telegram.
-    // --from overrides this for self-messages and system prompts, so an
-    // agent's own machinery isn't mistaken for the owner speaking.
     const owner = options.from ? null : resolveUser(config, topic.owner);
     const envelope = {
       updateId: `cli:${Date.now()}`,
@@ -692,9 +688,6 @@ function promptText(options) {
   return options.text || "";
 }
 
-// Mirror the gateway's display_messages bridge for CLI prompts: stream
-// assistant text and custom tool progress (edited in place) to the topic,
-// instead of dumping everything at turn end.
 function createCliDisplayBridge(config, telegram, topic, envelope) {
   const configured = topic.display_messages || config.agents?.[topic.agent]?.display_messages || config.telegram.display_messages;
   if (!configured) return null;
@@ -777,8 +770,6 @@ function cliDisplayItemFromEvent(event) {
   return null;
 }
 
-// Same heuristic as the gateway: a tool result carrying Telegram message ids
-// means the tool already delivered user-visible output.
 function cliIsTelegramDeliveryEvent(event) {
   if (event?.type !== "tool_execution_end") return false;
   const details = event.result?.details;

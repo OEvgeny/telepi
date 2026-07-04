@@ -218,8 +218,6 @@ function startTopicMessage(config, telegram, topic, envelope) {
   return run;
 }
 
-// Starts a run for an envelope, registers it in inFlight, and when it
-// finishes dispatches any messages that queued up while it was unsteerable.
 function dispatchTopicRun(config, telegram, inFlight, topic, envelope, pending = []) {
   const key = `${envelope.chatId}:${envelope.topicId}`;
   const run = startTopicMessage(config, telegram, topic, envelope);
@@ -239,7 +237,6 @@ function drainPendingEnvelopes(config, telegram, inFlight, topic, run) {
   const key = `${queued[0].chatId}:${queued[0].topicId}`;
   const active = inFlight.get(key);
   if (active && active !== run) {
-    // A newer run already took the slot; hand it the queue.
     active.pending.push(...queued);
     return;
   }
@@ -256,8 +253,6 @@ async function queueEnvelopeForRun(config, telegram, inFlight, topic, run, envel
   run.pending.push(envelope);
   console.error(`queued message chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${envelope.messageId}`);
   if (run.pendingDrained) {
-    // The run finished while we were queueing; drain again so the message
-    // isn't stranded on a dead run object.
     drainPendingEnvelopes(config, telegram, inFlight, topic, run);
   }
   await telegram.setMessageReaction({
@@ -518,7 +513,6 @@ async function handleButtonAction(telegram, query, callback) {
   const action = callback.action || {};
   try {
     if (action.type === "answer") {
-      // Informational popup; keep the keyboard so it can be tapped again.
       await telegram.answerCallbackQuery({
         callbackQueryId: query.id,
         text: String(action.text || "").slice(0, 190),
@@ -582,9 +576,7 @@ function findButtonCallback(config, { token, index }) {
     try {
       const record = JSON.parse(lines[lineIndex]);
       if (record?.token === token) return normalizeButtonCallback(record, index);
-    } catch {
-      // Ignore malformed historical records.
-    }
+    } catch {}
   }
   return null;
 }
@@ -1069,7 +1061,7 @@ function findSentMessageRecord(chatId, messageId) {
     try {
       const record = JSON.parse(lines[i]);
       if (record.chat_id === String(chatId) && record.message_id === String(messageId)) return record;
-    } catch { /* skip corrupt line */ }
+    } catch {}
   }
   return null;
 }
@@ -1141,7 +1133,6 @@ async function sendLongMessage(telegram, message) {
         if (!sent) break;
         sentMessages.push(sent);
       } else if (payload.parseMode && /parse entities|can't parse entities|reserved and must be escaped/i.test(error.message)) {
-        // Converter gap — should be rare; the raw chunk is the fallback.
         console.error(`MarkdownV2 parse failed after conversion chat=${message.chatId} topic=${message.topicId}; retrying as plain text: ${error.message}`);
         const sent = await sendTelegramMessageOrDropOnRateLimit(telegram, { ...payload, parseMode: undefined, text: chunk }, message);
         if (!sent) break;
