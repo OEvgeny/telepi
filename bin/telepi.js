@@ -300,7 +300,7 @@ program
   .command("topic:set-model")
   .description("Set or clear a per-topic pi model override")
   .requiredOption("--name <name>", "Existing mapping name")
-  .option("--model <provider/model>", "Model override to pass to pi")
+  .option("--model <provider/model[:thinking]>", "Model override to pass to pi, optionally with effort")
   .option("--clear", "Remove the per-topic model override")
   .action((options) => {
     const config = load();
@@ -541,7 +541,7 @@ program
   .description("Compact a topic's pi session transcript in place")
   .requiredOption("--topic <name>", "Existing topic mapping name")
   .option("--instructions <text>", "Custom compaction instructions")
-  .option("--model <provider/model>", "Model to run the compaction with; defaults to the topic's configured model")
+  .option("--model <provider/model[:thinking]>", "Model/effort for compaction; defaults to the topic's configured model")
   .option("--keep-recent <tokens>", "How many recent tokens to keep uncompacted (default 20000)")
   .option("--json", "Print a machine-readable result")
   .action(async (options) => {

@@ -56,11 +56,14 @@ Bind an existing topic:
 npm run telepi -- topic:bind --chat-id <chat_id> --topic-id <topic_id> --name Helper --agent helper
 ```
 
-Set a per-topic model (the agent's main topic acts as the default for its other topics):
+Set a per-topic model (the agent's main topic acts as the default for its other topics). Append a pi thinking level to configure effort for both normal turns and compaction:
 
 ```bash
 npm run telepi -- topic:set-model --name Helper --model <provider/model>
+npm run telepi -- topic:set-model --name Helper --model <provider/model>:high
 ```
+
+Supported levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max` (subject to model support).
 
 Start a topic with a fresh pi session without deleting old transcript files:
 

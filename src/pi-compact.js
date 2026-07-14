@@ -40,10 +40,12 @@ export async function compactPiSession(config, topic, instructions, options = {}
   const { createAgentSession, SessionManager, SettingsManager } = await loadPiModule();
   const sessionManager = SessionManager.open(sessionFile, config.project.sessions_dir, entityDir);
   const modelSpec = options.model || resolveTopicModel(config, topic, agent);
+  const resolvedModel = modelSpec ? await resolveCompactionModel(modelSpec) : {};
   const { session } = await createAgentSession({
     cwd: entityDir,
     sessionManager,
-    model: modelSpec ? await resolveModel(modelSpec) : undefined,
+    model: resolvedModel.model,
+    thinkingLevel: resolvedModel.thinkingLevel,
     settingsManager: buildSettingsManager(SettingsManager, entityDir, options.keepRecentTokens),
   });
   const combinedInstructions = instructions
@@ -99,14 +101,20 @@ function buildSettingsManager(SettingsManager, entityDir, keepRecentTokens) {
   });
 }
 
-async function resolveModel(spec) {
-  const [provider, ...rest] = String(spec).split("/");
-  const modelId = rest.join("/");
-  if (!provider || !modelId) throw new Error(`Invalid model spec: ${spec} (expected provider/model)`);
-  const { AuthStorage, ModelRegistry } = await loadPiModule();
-  const model = ModelRegistry.create(AuthStorage.create()).find(provider, modelId);
-  if (!model) throw new Error(`Unknown model: ${spec}`);
-  return model;
+// Match pi's own --model parser, including optional :thinking suffixes such
+// as openai-codex/gpt-5.6-sol:high. Keeping this at the fresh compaction
+// worker boundary also means model aliases/catalog updates match normal runs.
+export async function resolveCompactionModel(spec) {
+  const { AuthStorage, ModelRegistry, resolveCliModel } = await loadPiModule();
+  const modelRegistry = ModelRegistry.create(AuthStorage.create());
+  const resolved = resolveCliModel({ cliModel: String(spec), modelRegistry });
+  if (resolved.error) throw new Error(resolved.error);
+  if (!resolved.model) throw new Error(`Unknown model: ${spec}`);
+  return {
+    model: resolved.model,
+    thinkingLevel: resolved.thinkingLevel,
+    warning: resolved.warning,
+  };
 }
 
 function findSessionFile(sessionDir, sessionId) {
