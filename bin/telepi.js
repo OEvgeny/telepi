@@ -13,8 +13,8 @@ import {
   writeConfig,
 } from "../src/config.js";
 import { TelegramClient, normalizeTopicColor, resolveForumTopicIcon } from "../src/telegram.js";
-import { toTelegramMarkdownV2 } from "../src/telegram-format.js";
-import { startPiForTopic } from "../src/pi-session.js";
+import { blockquoteEntities, toTelegramMarkdownV2 } from "../src/telegram-format.js";
+import { buildPiRunSpec, startPiForTopic } from "../src/pi-session.js";
 
 const program = new Command();
 
@@ -174,6 +174,29 @@ program
   });
 
 program
+  .command("agent:extensions")
+  .description("List or modify an agent's pi extensions")
+  .requiredOption("--id <id>", "Agent id")
+  .option("--add <path...>", "Extension file(s) relative to project root")
+  .option("--remove <path...>", "Extension file(s) to detach")
+  .action((options) => {
+    const config = load();
+    const agent = config.agents[options.id];
+    if (!agent) throwCli(`unknown agent: ${options.id}`);
+    const extensions = new Set(agent.extensions || []);
+    for (const extension of options.add || []) {
+      if (!existsSync(resolvePath(config.project.root, extension))) throwCli(`extension file not found: ${extension}`);
+      extensions.add(extension);
+    }
+    for (const extension of options.remove || []) {
+      if (!extensions.delete(extension)) throwCli(`extension not attached: ${extension}`);
+    }
+    agent.extensions = [...extensions];
+    if (options.add?.length || options.remove?.length) save(config);
+    console.log(agent.extensions.length ? agent.extensions.join("\n") : "(no extensions)");
+  });
+
+program
   .command("topic:create")
   .description("Create a Telegram forum topic and bind it to an agent")
   .option("--chat-id <id>", "Telegram chat id")
@@ -296,6 +319,88 @@ program
   });
 
 program
+  .command("topic:send")
+  .description("Send a direct Telegram message to a mapped topic without invoking pi or the gateway")
+  .option("--topic <name>", "Existing topic mapping name")
+  .option("--agent <id>", "Configured agent id; allowed only when it has exactly one enabled topic")
+  .option("--text <text>", "Message text")
+  .option("--stdin", "Read message text from stdin")
+  .option("--reply-to <message-id>", "Telegram message id to reply to")
+  .option("--quote", "Render the message as a Telegram blockquote")
+  .option("--no-record", "Do not record the sent message in the topic's pi session transcript")
+  .action(async (options) => {
+    const config = load();
+    const topic = resolvePromptTopic(config, options);
+    if (topic.enabled === false) throwCli(`topic is disabled: ${topic.name}`);
+    const text = promptText(options);
+    if (!text.trim()) throwCli("missing --text or non-empty --stdin");
+
+    const telegram = new TelegramClient(getBotToken(config));
+    const sentMessages = await sendCliLongMessage(telegram, {
+      chatId: topic.chat_id,
+      topicId: topic.topic_id,
+      replyToMessageId: options.replyTo || undefined,
+      text,
+      quote: options.quote,
+    });
+    console.log(`sent ${sentMessages.length} message(s) to ${topic.name}: ${sentMessages.map((message) => message.message_id).join(",")}`);
+
+    // What appears in the agent's voice must also enter the agent's memory —
+    // otherwise it has no idea it "said" this when the user replies to it.
+    if (options.record) {
+      const { appendTopicSessionNote } = await import("../src/pi-compact.js");
+      const ids = sentMessages.map((message) => message.message_id).join(",");
+      const recorded = await appendTopicSessionNote(config, topic,
+        `The following message was posted to your Telegram topic in your name via topic:send (message id ${ids}). You did not compose it in this conversation, but the user sees it as yours:\n\n${text}`);
+      console.log(recorded ? "recorded in session transcript" : "no session transcript yet; nothing recorded");
+    }
+  });
+
+program
+  .command("topic:pi-command")
+  .description("Print the pi CLI command telepi would use for a mapped topic")
+  .option("--topic <name>", "Existing topic mapping name")
+  .option("--agent <id>", "Configured agent id; allowed only when it has exactly one enabled topic")
+  .option("--text <text>", "Prompt text to include with -p")
+  .option("--stdin", "Read prompt text from stdin and include it with -p")
+  .option("--from <name>", "Sender name in the routing header; defaults to the topic owner")
+  .option("--source <text>", "Source/provenance line in the routing header")
+  .option("--message-id <id>", "Telegram message id in the routing header")
+  .option("--session-id <id>", "Override the configured pi session id")
+  .option("--session <path>", "Use a specific pi session file/path instead of --session-id")
+  .option("--fork <path>", "Fork a specific pi session file/path instead of --session-id")
+  .option("--name <name>", "Set pi session display name")
+  .action((options) => {
+    const config = load();
+    const topic = resolvePromptTopic(config, options);
+    if (topic.enabled === false) throwCli(`topic is disabled: ${topic.name}`);
+    if (options.session && options.fork) throwCli("use either --session or --fork, not both");
+    if (options.session && options.sessionId) throwCli("use either --session or --session-id, not both");
+    if (options.fork && options.sessionId) throwCli("use either --fork or --session-id, not both");
+
+    const owner = options.from ? null : resolveUser(config, topic.owner);
+    const text = promptText(options);
+    const envelope = {
+      chatId: String(topic.chat_id),
+      topicId: topic.topic_id == null ? null : String(topic.topic_id),
+      userId: owner?.id || "telepi-cli",
+      userName: options.from || owner?.alias || "telepi-cli",
+      messageId: options.messageId || "",
+      source: options.source || "",
+      text,
+      attachments: [],
+    };
+    const spec = buildPiRunSpec(config, topic, envelope, {
+      session: options.session,
+      fork: options.fork,
+      sessionId: options.sessionId,
+      name: options.name,
+      botToken: "",
+    });
+    console.log(formatPiShellCommand(config, spec, text.trim().length > 0));
+  });
+
+program
   .command("topic:prompt")
   .description("Prompt a mapped topic's pi agent and send the response to Telegram")
   .option("--topic <name>", "Existing topic mapping name")
@@ -375,6 +480,7 @@ program
         topicId: topic.topic_id,
         replyToMessageId: promptMessageId || undefined,
         text: `pi session failed (${result.code})\n\n${result.stderr || result.stdout || "No output"}`,
+        quote: true,
       });
       process.exitCode = 1;
       return;
@@ -385,6 +491,7 @@ program
         topicId: topic.topic_id,
         replyToMessageId: promptMessageId || undefined,
         text: `⚠️ ${topic.agent} hit a model error: ${lastModelError}`,
+        quote: true,
       });
     } else if (!delivered && !toolDeliveries) {
       await sendCliLongMessage(telegram, {
@@ -392,6 +499,7 @@ program
         topicId: topic.topic_id,
         replyToMessageId: promptMessageId || undefined,
         text: result.stdout || `${topic.agent} completed without output.`,
+        quote: !result.stdout,
       });
     }
     console.log(`completed ${topic.name} -> ${topic.agent}/${topic.session_id}`);
@@ -435,6 +543,7 @@ program
   .option("--instructions <text>", "Custom compaction instructions")
   .option("--model <provider/model>", "Model to run the compaction with; defaults to the topic's configured model")
   .option("--keep-recent <tokens>", "How many recent tokens to keep uncompacted (default 20000)")
+  .option("--json", "Print a machine-readable result")
   .action(async (options) => {
     const { compactPiSession } = await import("../src/pi-compact.js");
     const config = load();
@@ -449,12 +558,33 @@ program
     } catch (error) {
       // Nothing new since the last compaction — a no-op, not a failure (timers rerun this nightly).
       if (/Already compacted|too small/i.test(error.message)) {
-        console.log(`skipped ${topic.name} (${topic.session_id}): ${error.message}`);
+        if (options.json) {
+          console.log(JSON.stringify({
+            status: "skipped",
+            topic: topic.name,
+            sessionId: topic.session_id,
+            reason: error.message,
+          }));
+        } else {
+          console.log(`skipped ${topic.name} (${topic.session_id}): ${error.message}`);
+        }
         return;
       }
       throw error;
     }
-    console.log(`compacted ${topic.name} (${topic.session_id}): tokensBefore=${result?.tokensBefore ?? "?"}`);
+    if (options.json) {
+      console.log(JSON.stringify({
+        status: "compacted",
+        topic: topic.name,
+        sessionId: topic.session_id,
+        result: {
+          firstKeptEntryId: result?.firstKeptEntryId,
+          tokensBefore: result?.tokensBefore,
+        },
+      }));
+    } else {
+      console.log(`compacted ${topic.name} (${topic.session_id}): tokensBefore=${result?.tokensBefore ?? "?"}`);
+    }
   });
 
 program
@@ -789,23 +919,57 @@ function cliTitledText(message, text) {
   return title ? `${title}\n${text}` : text;
 }
 
+function formatPiShellCommand(config, spec, includePrompt) {
+  const envLines = Object.entries(spec.env).map(([name, value]) => {
+    const rendered = name === "TELEPI_BOT_TOKEN" ? botTokenShellValue(config) : shQuote(value);
+    return `${name}=${rendered}`;
+  });
+  const args = ["pi", ...spec.args];
+  if (includePrompt) args.push("-p", spec.initialMessage);
+  return [
+    `cd ${shQuote(spec.cwd)} && \\`,
+    ...envLines.map((line) => `${line} \\`),
+    formatShellArgv(args),
+  ].join("\n");
+}
+
+function formatShellArgv(args) {
+  const [command, ...rest] = args;
+  if (!rest.length) return shQuote(command);
+  return [shQuote(command), ...rest.map((arg) => `  ${shQuote(arg)}`)].join(" \\\n");
+}
+
+function botTokenShellValue(config) {
+  const envName = config.telegram?.bot_token_env || "TELEPI_BOT_TOKEN";
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(envName)) return shQuote("");
+  return `"\${${envName}:?set ${envName}}"`;
+}
+
+function shQuote(value) {
+  return `'${String(value ?? "").replace(/'/g, `'\\''`)}'`;
+}
+
 async function sendCliLongMessage(telegram, message) {
   const chunks = splitCliMessage(message.text);
   const sentMessages = [];
   for (const [index, chunk] of chunks.entries()) {
-    const converted = toTelegramMarkdownV2(chunk);
+    const quoted = Boolean(message.quote);
+    const converted = quoted ? null : toTelegramMarkdownV2(chunk);
     const payload = {
       chatId: message.chatId,
       topicId: message.topicId,
       replyToMessageId: index === 0 ? message.replyToMessageId : undefined,
       text: converted ?? chunk,
       parseMode: converted ? "MarkdownV2" : undefined,
+      entities: quoted ? blockquoteEntities(chunk) : undefined,
     };
     try {
       sentMessages.push(await telegram.sendMessage(payload));
     } catch (error) {
       if (payload.replyToMessageId && /reply|replied|message to be replied/i.test(error.message)) {
         sentMessages.push(await telegram.sendMessage({ ...payload, replyToMessageId: undefined }));
+      } else if (payload.entities && /entities|entity/i.test(error.message)) {
+        sentMessages.push(await telegram.sendMessage({ ...payload, entities: undefined }));
       } else if (payload.parseMode && /parse entities|can't parse entities|reserved and must be escaped/i.test(error.message)) {
         sentMessages.push(await telegram.sendMessage({ ...payload, parseMode: undefined, text: chunk }));
       } else {

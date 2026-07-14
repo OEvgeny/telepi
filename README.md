@@ -78,11 +78,33 @@ Compact a long-running session in place:
 npm run telepi -- session:compact --topic Helper [--instructions "..."] [--model <provider/model>]
 ```
 
+Send a direct Telegram message to a topic without invoking pi or the gateway:
+
+```bash
+npm run telepi -- topic:send --topic Helper --text "..." [--reply-to <message-id>] [--quote]
+```
+
 Send a prompt into a topic from the command line (used by timers and scripts):
 
 ```bash
 npm run telepi -- topic:prompt --topic Helper --text "..." [--no-echo] [--from "Name"] [--source "provenance"]
 ```
+
+The gateway also owns a few Telegram slash commands directly:
+
+- `/help` — show gateway-owned commands.
+- `/compact [instructions]` — compact the current topic's pi session.
+- `/retry` — rerun the last non-command prompt remembered for that chat/topic.
+
+For cron jobs, webhooks, or local scripts that should not shell out to the CLI, enable a prompt inbox with environment variables in the gateway service:
+
+```dotenv
+TELEPI_PROMPT_INBOX_DIR=/absolute/path/to/prompt-inbox
+TELEPI_PROMPT_INBOX_TOPIC=Helper          # optional default topic name
+TELEPI_PROMPT_INBOX_INTERVAL_MS=60000     # optional; minimum 1000
+```
+
+The inbox processes one `.txt` file at a time. Files may start with `Topic: Helper` to override the default topic; empty files are deleted, busy topics leave files queued, and invalid files are renamed to `.failed` to avoid loops.
 
 Run the gateway:
 

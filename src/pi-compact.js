@@ -61,6 +61,23 @@ export async function compactPiSession(config, topic, instructions, options = {}
   }
 }
 
+// Record a message the machinery posted to Telegram in the topic's session
+// transcript, so the agent remembers "saying" what appeared in its voice.
+// Custom message entries participate in LLM context on the next run. If the
+// topic has no session file yet there is nothing to record into.
+export async function appendTopicSessionNote(config, topic, noteText) {
+  const agent = getAgent(config, topic.agent);
+  const entityDir = resolveEntityDir(config, agent);
+  const sessionId = topic.session_id || agent.session_id || `${topic.agent}-${topic.topic_id}`;
+  const sessionFile = findSessionFile(config.project.sessions_dir, sessionId);
+  if (!sessionFile) return false;
+  const { SessionManager } = await loadPiModule();
+  const sessionManager = SessionManager.open(sessionFile, config.project.sessions_dir, entityDir);
+  sessionManager.appendCustomMessageEntry("telepi-sent-as-you", [{ type: "text", text: noteText }], false);
+  sessionManager.flush?.();
+  return true;
+}
+
 export function parseCompactCommand(text) {
   const match = String(text || "").match(/^\/compact(?:@\S+)?(?:\s+([\s\S]*))?$/i);
   if (!match) return null;

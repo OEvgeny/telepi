@@ -11,16 +11,38 @@ export async function runPiForTopic(config, topic, envelope, options = {}) {
 }
 
 export async function startPiForTopic(config, topic, envelope, options = {}) {
+  const spec = buildPiRunSpec(config, topic, envelope, options);
+  return startRpcProcess(spec.args, {
+    cwd: spec.cwd,
+    idleTimeoutMs: spec.idleTimeoutMs,
+    hardTimeoutMs: spec.hardTimeoutMs,
+    onText: options.onText,
+    onEvent: options.onEvent,
+    env: spec.env,
+    initialMessage: spec.initialMessage,
+    steerMessage: (steerEnvelope) => formatTelegramMessage(topic, withAliasName(config, steerEnvelope)),
+  });
+}
+
+export function buildPiRunSpec(config, topic, envelope, options = {}) {
   const agent = getAgent(config, topic.agent);
   const entityDir = resolveEntityDir(config, agent);
-  const sessionId = topic.session_id || agent.session_id || `${topic.agent}-${topic.topic_id}`;
+  const sessionId = options.sessionId || topic.session_id || agent.session_id || `${topic.agent}-${topic.topic_id}`;
   mkdirSync(entityDir, { recursive: true });
   mkdirSync(config.project.sessions_dir, { recursive: true });
 
-  const args = [
-    "--session-id", String(sessionId),
-    "--session-dir", config.project.sessions_dir,
-  ];
+  const args = ["--session-dir", config.project.sessions_dir];
+  if (options.session) {
+    args.push("--session", resolvePath(config.project.root, options.session));
+  } else if (options.fork) {
+    args.push("--fork", resolvePath(config.project.root, options.fork));
+  } else {
+    args.push("--session-id", String(sessionId));
+  }
+
+  if (options.name) {
+    args.push("--name", String(options.name));
+  }
 
   for (const extension of config.project.extensions || []) {
     args.push("--extension", resolvePath(config.project.root, extension));
@@ -39,24 +61,25 @@ export async function startPiForTopic(config, topic, envelope, options = {}) {
   if (model) {
     args.push("--model", model);
   }
-  return startRpcProcess(args, {
+
+  return {
     cwd: entityDir,
-    idleTimeoutMs: Number(agent.idle_timeout_ms || agent.timeout_ms || 15 * 60 * 1000),
-    hardTimeoutMs: Number(agent.hard_timeout_ms || 0),
-    onText: options.onText,
-    onEvent: options.onEvent,
+    args,
     env: {
       TELEPI_CHAT_ID: envelope.chatId,
       TELEPI_TOPIC_ID: envelope.topicId || "",
       TELEPI_MESSAGE_ID: envelope.messageId || "",
       TELEPI_TOPIC_NAME: topic.name || "",
       TELEPI_AGENT_ID: topic.agent || "",
-      TELEPI_BOT_TOKEN: getBotToken(config),
+      TELEPI_BOT_TOKEN: options.botToken ?? getBotToken(config),
       TELEPI_BUTTON_STORE: resolvePath(config.project.cache_dir, "button-callbacks.jsonl"),
     },
     initialMessage: formatTelegramMessage(topic, withAliasName(config, envelope)),
-    steerMessage: (steerEnvelope) => formatTelegramMessage(topic, withAliasName(config, steerEnvelope)),
-  });
+    idleTimeoutMs: Number(agent.idle_timeout_ms || agent.timeout_ms || 15 * 60 * 1000),
+    hardTimeoutMs: Number(agent.hard_timeout_ms || 0),
+    sessionId: String(sessionId),
+    agent,
+  };
 }
 
 // Agents should always see one stable name per person, regardless of the

@@ -7,18 +7,23 @@ const TOPIC_COLOR_BY_NAME = {
   red: 16478047,
 };
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const FILE_DOWNLOAD_TIMEOUT_MS = 60_000;
+const PHOTO_UPLOAD_TIMEOUT_MS = 120_000;
+
 export class TelegramClient {
   constructor(token) {
     this.token = token;
     this.baseUrl = `https://api.telegram.org/bot${token}`;
   }
 
-  async request(method, payload = {}) {
-    const response = await fetch(`${this.baseUrl}/${method}`, {
+  async request(method, payload = {}, options = {}) {
+    const timeoutMs = Number(options.timeoutMs || DEFAULT_REQUEST_TIMEOUT_MS);
+    const response = await fetchWithTimeout(`${this.baseUrl}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
-    });
+    }, timeoutMs, `Telegram ${method}`);
     const body = await response.json().catch(() => null);
     if (!response.ok || !body?.ok) {
       const message = body?.description || `${response.status} ${response.statusText}`;
@@ -39,7 +44,7 @@ export class TelegramClient {
       timeout: timeoutSeconds,
       limit,
       allowed_updates: ["message", "edited_message", "callback_query", "message_reaction"],
-    });
+    }, { timeoutMs: (Number(timeoutSeconds) + 10) * 1000 });
   }
 
   async getFile(fileId) {
@@ -47,14 +52,19 @@ export class TelegramClient {
   }
 
   async downloadFile(filePath) {
-    const response = await fetch(`https://api.telegram.org/file/bot${this.token}/${filePath}`);
+    const response = await fetchWithTimeout(
+      `https://api.telegram.org/file/bot${this.token}/${filePath}`,
+      {},
+      FILE_DOWNLOAD_TIMEOUT_MS,
+      "Telegram file download",
+    );
     if (!response.ok) {
       throw new Error(`Telegram file download failed: ${response.status} ${response.statusText}`);
     }
     return Buffer.from(await response.arrayBuffer());
   }
 
-  async sendMessage({ chatId, topicId, text, replyToMessageId, parseMode, replyMarkup }) {
+  async sendMessage({ chatId, topicId, text, replyToMessageId, parseMode, entities, replyMarkup }) {
     return this.request("sendMessage", compact({
       chat_id: chatId,
       message_thread_id: topicId,
@@ -62,6 +72,7 @@ export class TelegramClient {
       reply_to_message_id: replyToMessageId,
       disable_web_page_preview: true,
       parse_mode: parseMode,
+      entities,
       reply_markup: replyMarkup,
     }));
   }
@@ -110,10 +121,10 @@ export class TelegramClient {
     const file = await import("node:fs/promises").then((fs) => fs.readFile(filePath));
     form.set("photo", new Blob([file]), filePath.split("/").pop() || "photo.jpg");
 
-    const response = await fetch(`${this.baseUrl}/sendPhoto`, {
+    const response = await fetchWithTimeout(`${this.baseUrl}/sendPhoto`, {
       method: "POST",
       body: form,
-    });
+    }, PHOTO_UPLOAD_TIMEOUT_MS, "Telegram sendPhoto");
     const body = await response.json().catch(() => null);
     if (!response.ok || !body?.ok) {
       const message = body?.description || `${response.status} ${response.statusText}`;
@@ -197,6 +208,21 @@ export class TelegramClient {
 
   async renameTopic({ chatId, topicId, name }) {
     return this.editTopic({ chatId, topicId, name });
+  }
+}
+
+async function fetchWithTimeout(url, options, timeoutMs, label) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`${label} timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

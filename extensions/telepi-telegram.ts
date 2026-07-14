@@ -8,6 +8,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 type ButtonInput = string | { label: string; data?: string; url?: string };
 type Button = { label: string; data?: string; url?: string };
 
+const TELEGRAM_MIN_INTERVAL_MS = 1000;
+const MAX_TELEGRAM_RATE_LIMIT_RETRY_MS = 5000;
+let telegramRequestQueue: Promise<unknown> = Promise.resolve();
+let nextTelegramRequestAt = 0;
+
 function botToken(): string {
 	const envName = process.env.TELEPI_BOT_TOKEN ? "TELEPI_BOT_TOKEN" : "PI_TELEGRAM_BOT_TOKEN";
 	const token = process.env[envName];
@@ -20,6 +25,29 @@ function buttonStorePath(): string {
 }
 
 async function telegramRequest(method: string, body: FormData | unknown): Promise<any> {
+	const scheduled = telegramRequestQueue.then(async () => {
+		const waitMs = Math.max(0, nextTelegramRequestAt - Date.now());
+		if (waitMs > 0) await sleep(waitMs);
+		nextTelegramRequestAt = Date.now() + TELEGRAM_MIN_INTERVAL_MS;
+		return telegramRequestWithRetry(method, body);
+	});
+	telegramRequestQueue = scheduled.catch(() => undefined);
+	return scheduled;
+}
+
+async function telegramRequestWithRetry(method: string, body: FormData | unknown): Promise<any> {
+	try {
+		return await performTelegramRequest(method, body);
+	} catch (error: any) {
+		const delayMs = telegramRateLimitDelayMs(error);
+		if (delayMs == null || delayMs > MAX_TELEGRAM_RATE_LIMIT_RETRY_MS) throw error;
+		await sleep(delayMs);
+		nextTelegramRequestAt = Date.now() + TELEGRAM_MIN_INTERVAL_MS;
+		return performTelegramRequest(method, body);
+	}
+}
+
+async function performTelegramRequest(method: string, body: FormData | unknown): Promise<any> {
 	const isForm = body instanceof FormData;
 	const response = await fetch(`https://api.telegram.org/bot${botToken()}/${method}`, {
 		method: "POST",
@@ -29,9 +57,21 @@ async function telegramRequest(method: string, body: FormData | unknown): Promis
 	const result = await response.json().catch(() => null);
 	if (!response.ok || !result?.ok) {
 		const message = result?.description || `${response.status} ${response.statusText}`;
-		throw new Error(`Telegram ${method} failed: ${message}`);
+		const error = new Error(`Telegram ${method} failed: ${message}`) as Error & { retryAfterSeconds?: number };
+		if (result?.parameters?.retry_after != null) error.retryAfterSeconds = Number(result.parameters.retry_after);
+		throw error;
 	}
 	return result.result;
+}
+
+function telegramRateLimitDelayMs(error: any): number | null {
+	if (!/Too Many Requests|retry after/i.test(error?.message || "")) return null;
+	const seconds = Number(error.retryAfterSeconds ?? error.message.match(/retry after (\d+)/i)?.[1] ?? 1);
+	return Math.max(1, seconds) * 1000;
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function normalizeButtons(input: ButtonInput[] | undefined): Button[] {

@@ -19,3 +19,9 @@ export function toTelegramMarkdownV2(text) {
     return null;
   }
 }
+
+export function blockquoteEntities(text) {
+  const value = String(text ?? "");
+  if (!value) return undefined;
+  return [{ type: "blockquote", offset: 0, length: value.length }];
+}

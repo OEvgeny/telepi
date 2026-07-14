@@ -1,30 +1,53 @@
 #!/usr/bin/env node
+import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { readConfig, getBotToken, findTopic } from "./config.js";
+import { promisify } from "node:util";
+import { readConfig, getBotToken, findTopic, findTopicByName } from "./config.js";
 import { TelegramClient, hydrateEnvelopeMedia, updateToEnvelope } from "./telegram.js";
-import { compactPiSession, parseCompactCommand } from "./pi-compact.js";
+import { parseCompactCommand } from "./pi-compact.js";
+import { normalizePromptInboxInterval, startPromptInboxPolling } from "./prompt-inbox.js";
 import { startPiForTopic } from "./pi-session.js";
-import { toTelegramMarkdownV2 } from "./telegram-format.js";
+import { blockquoteEntities, toTelegramMarkdownV2 } from "./telegram-format.js";
 import { installTimestampedConsole } from "./logging.js";
 
 installTimestampedConsole();
+
+const execFileAsync = promisify(execFile);
 
 const configPath = process.argv.includes("--config")
   ? process.argv[process.argv.indexOf("--config") + 1]
   : undefined;
 
+const GATEWAY_TELEGRAM_MIN_INTERVAL_MS = 1000;
+const TOOL_UPDATE_DEBOUNCE_MS = 1000;
+const MAX_GATEWAY_RATE_LIMIT_RETRY_MS = 5000;
+const AUTO_RETRY_SOURCE = "auto-rpc-timeout-retry";
+const GATEWAY_RATE_LIMITED_TELEGRAM_METHODS = new Set([
+  "sendMessage",
+  "editMessageText",
+  "editMessageReplyMarkup",
+  "setMessageReaction",
+  "sendPhoto",
+]);
+const lastPromptByTopic = new Map();
+const typingByTopic = new Map();
+let queuePersistence;
+
 async function main() {
   let config = readConfig(configPath);
   initSentMessageIndex(config);
-  const telegram = new TelegramClient(getBotToken(config));
-  const me = await telegram.getMe();
-  await configureBotCommands(telegram, config);
+  const telegramClient = new TelegramClient(getBotToken(config));
+  const me = await telegramClient.getMe();
+  await configureBotCommands(telegramClient, config);
+  const telegram = createTelegramIssueLimiter(telegramClient);
   console.error(`telepi gateway connected as ${me.first_name} (@${me.username || "unknown"})`);
 
   let offset = Number(process.env.TELEPI_UPDATE_OFFSET || 0) || undefined;
   const inFlight = new Map();
+  initPendingQueuePersistence(config, inFlight);
+  startConfiguredPromptInbox(() => config, telegram, inFlight);
   let pollFailures = 0;
 
   while (true) {
@@ -59,8 +82,13 @@ async function main() {
         });
         continue;
       }
+      const rawMessage = update.message || update.edited_message;
+      if (rawMessage) logReceivedMessageUpdate(update, rawMessage);
       let envelope = updateToEnvelope(update);
-      if (!envelope) continue;
+      if (!envelope) {
+        if (rawMessage) logDroppedMessageUpdate(update, rawMessage, "no_text_or_supported_attachment");
+        continue;
+      }
       envelope = normalizeTelegramCommands(envelope, me.username);
       if (!isAllowedUser(config, envelope.userId)) {
         console.error(`ignored unauthorized user ${envelope.userId}`);
@@ -74,6 +102,15 @@ async function main() {
       const configForMessage = config;
       const key = `${envelope.chatId}:${envelope.topicId}`;
       const active = inFlight.get(key);
+      if (isHelpCommand(envelope.text)) {
+        await handleHelpCommand(telegram, configForMessage, topic, envelope);
+        continue;
+      }
+      if (isRetryCommand(envelope.text)) {
+        await handleRetryCommand(configForMessage, telegram, inFlight, topic, envelope, active);
+        continue;
+      }
+      rememberRetryPrompt(envelope);
       if (active) {
         steerRunningTopic(configForMessage, telegram, inFlight, topic, envelope, active).catch((error) => {
           console.error(`steering dispatch failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
@@ -86,11 +123,128 @@ async function main() {
   }
 }
 
+function logReceivedMessageUpdate(update, message) {
+  console.error(`received ${update.edited_message ? "edited_message" : "message"} ${messageUpdateLogFields(update, message)}`);
+}
+
+function logDroppedMessageUpdate(update, message, reason) {
+  console.error(`dropped ${update.edited_message ? "edited_message" : "message"} ${messageUpdateLogFields(update, message)} reason=${reason}`);
+}
+
+function messageUpdateLogFields(update, message) {
+  const text = message.text || message.caption || "";
+  const attachments = summarizeMessageAttachmentsForLog(message);
+  const fields = [
+    `update=${update.update_id}`,
+    `chat=${message.chat?.id ?? "unknown"}`,
+    `topic=${message.message_thread_id ?? "none"}`,
+    `message=${message.message_id ?? "unknown"}`,
+    `from=${message.from?.id ?? "unknown"}`,
+    `username=${JSON.stringify(message.from?.username || message.from?.first_name || "unknown")}`,
+    `bot=${Boolean(message.from?.is_bot)}`,
+    `reply_to=${message.reply_to_message?.message_id ?? "none"}`,
+    `text_len=${text.length}`,
+    `attachments=${attachments || "none"}`,
+  ];
+  if (text) fields.push(`text=${JSON.stringify(previewForLog(text))}`);
+  return fields.join(" ");
+}
+
+function summarizeMessageAttachmentsForLog(message) {
+  const attachments = [];
+  if (Array.isArray(message.photo) && message.photo.length) attachments.push("photo");
+  if (message.document) attachments.push(`document:${message.document.file_name || message.document.mime_type || "unnamed"}`);
+  return attachments.join(",");
+}
+
+function previewForLog(text, maxLength = 120) {
+  const normalized = String(text).replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 1)}…`;
+}
+
+function createTelegramIssueLimiter(telegram, minIntervalMs = GATEWAY_TELEGRAM_MIN_INTERVAL_MS) {
+  let queue = Promise.resolve();
+  let nextAllowedAt = 0;
+
+  return new Proxy(telegram, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== "function") return value;
+      if (!GATEWAY_RATE_LIMITED_TELEGRAM_METHODS.has(String(prop))) return value.bind(target);
+      return (...args) => {
+        const scheduled = queue.then(async () => {
+          const waitMs = Math.max(0, nextAllowedAt - Date.now());
+          if (waitMs > 0) await sleep(waitMs);
+          nextAllowedAt = Date.now() + minIntervalMs;
+          return value.apply(target, args);
+        });
+        queue = scheduled.catch(() => undefined);
+        return scheduled;
+      };
+    },
+  });
+}
+
+function startConfiguredPromptInbox(getConfig, telegram, inFlight) {
+  const inboxDir = process.env.TELEPI_PROMPT_INBOX_DIR?.trim();
+  if (!inboxDir) return () => undefined;
+
+  const intervalMs = normalizePromptInboxInterval(process.env.TELEPI_PROMPT_INBOX_INTERVAL_MS);
+  const defaultTopicName = process.env.TELEPI_PROMPT_INBOX_TOPIC?.trim() || "";
+  console.error(`prompt inbox enabled dir=${inboxDir} interval=${intervalMs}ms${defaultTopicName ? ` default_topic=${defaultTopicName}` : ""}`);
+  return startPromptInboxPolling({
+    inboxDir,
+    intervalMs,
+    defaultTopicName,
+    onInvalid: (claimed) => {
+      console.error(`prompt inbox invalid file=${claimed.path}: ${claimed.invalidReason}`);
+    },
+    onError: (error) => {
+      console.error(`prompt inbox polling failed: ${error.stack || error.message}`);
+    },
+    handlePrompt: async (claimed) => {
+      const config = getConfig();
+      const topic = findTopicByName(config, claimed.topicName);
+      if (!topic || topic.enabled === false) {
+        console.error(`prompt inbox unknown topic file=${claimed.path} topic=${claimed.topicName}`);
+        await claimed.fail();
+        return false;
+      }
+      const key = `${topic.chat_id}:${topic.topic_id}`;
+      if (inFlight.has(key)) return false;
+      const ownerAlias = config.users?.owner;
+      const owner = ownerAlias ? config.users?.aliases?.[ownerAlias] : undefined;
+      const envelope = {
+        chatId: String(topic.chat_id),
+        topicId: topic.topic_id == null ? null : String(topic.topic_id),
+        userId: owner?.id || null,
+        userName: owner?.alias || "prompt-inbox",
+        messageId: `prompt-inbox:${Date.now()}`,
+        text: claimed.prompt,
+        source: `prompt-inbox:${claimed.fileName}`,
+      };
+      rememberRetryPrompt(envelope);
+      dispatchTopicRun(config, telegram, inFlight, topic, envelope);
+      console.error(`prompt inbox queued file=${claimed.path} topic=${topic.name}`);
+      return true;
+    },
+  });
+}
+
 async function configureBotCommands(telegram, config) {
   const commands = [
     {
+      command: "help",
+      description: "Show telepi gateway commands",
+    },
+    {
       command: "compact",
       description: "Compact the current pi session with an optional prompt",
+    },
+    {
+      command: "retry",
+      description: "Retry the last prompt in this topic",
     },
   ];
   for (const scope of commandScopes(config)) {
@@ -144,7 +298,7 @@ function commandChatIds(config) {
 
 function normalizeTelegramCommands(envelope, botUsername) {
   if (!botUsername || !envelope.text) return envelope;
-  const pattern = new RegExp(`^/(compact)@${escapeRegExp(botUsername)}(?=\\s|$)`, "i");
+  const pattern = new RegExp(`^/(compact|help|retry)@${escapeRegExp(botUsername)}(?=\\s|$)`, "i");
   const text = envelope.text.replace(pattern, "/$1");
   return text === envelope.text ? envelope : { ...envelope, text };
 }
@@ -160,6 +314,86 @@ function reloadConfig(previousConfig, path) {
     console.error(`config reload failed: ${error.message}`);
     return previousConfig;
   }
+}
+
+function isHelpCommand(text) {
+  return /^\/help(?:@\S+)?(?:\s|$)/i.test(String(text || "").trim());
+}
+
+function isRetryCommand(text) {
+  return /^\/retry(?:@\S+)?(?:\s|$)/i.test(String(text || "").trim());
+}
+
+function isGatewayCommand(text) {
+  return /^\/(?:help|retry|compact)(?:@\S+)?(?:\s|$)/i.test(String(text || "").trim());
+}
+
+function retryKey(envelope) {
+  return `${envelope.chatId}:${envelope.topicId}`;
+}
+
+function rememberRetryPrompt(envelope) {
+  if (envelope.source === AUTO_RETRY_SOURCE || isGatewayCommand(envelope.text)) return;
+  if (!String(envelope.text || "").trim() && !envelope.telegramAttachments?.length && !envelope.attachments?.length) return;
+  lastPromptByTopic.set(retryKey(envelope), {
+    ...envelope,
+    telegramAttachments: envelope.telegramAttachments ? [...envelope.telegramAttachments] : undefined,
+    attachments: envelope.attachments ? [...envelope.attachments] : undefined,
+    replyTo: envelope.replyTo ? { ...envelope.replyTo } : undefined,
+  });
+}
+
+async function handleHelpCommand(telegram, config, topic, envelope) {
+  const inboxEnabled = Boolean(process.env.TELEPI_PROMPT_INBOX_DIR?.trim());
+  const lines = [
+    "telepi gateway commands:",
+    "/help — show this message",
+    "/compact [instructions] — compact this topic's pi session",
+    "/retry — rerun the last prompt in this topic",
+    inboxEnabled
+      ? `Prompt inbox: enabled${process.env.TELEPI_PROMPT_INBOX_TOPIC ? ` (default topic: ${process.env.TELEPI_PROMPT_INBOX_TOPIC})` : ""}`
+      : "Prompt inbox: disabled (set TELEPI_PROMPT_INBOX_DIR to enable)",
+  ];
+  await sendLongMessage(telegram, {
+    chatId: envelope.chatId,
+    topicId: envelope.topicId,
+    replyToMessageId: envelope.messageId,
+    text: lines.join("\n"),
+    quote: true,
+  });
+}
+
+async function handleRetryCommand(config, telegram, inFlight, topic, envelope, active) {
+  if (active) {
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: envelope.messageId,
+      text: `Cannot retry ${topic.name} while it is running.`,
+      quote: true,
+    });
+    return;
+  }
+  const previous = lastPromptByTopic.get(retryKey(envelope));
+  if (!previous) {
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: envelope.messageId,
+      text: "No previous prompt remembered for this topic.",
+      quote: true,
+    });
+    return;
+  }
+  const retryEnvelope = {
+    ...previous,
+    updateId: envelope.updateId,
+    messageId: envelope.messageId,
+    userId: envelope.userId,
+    userName: envelope.userName,
+    source: `retry of Telegram message ${previous.messageId}`,
+  };
+  dispatchTopicRun(config, telegram, inFlight, topic, retryEnvelope);
 }
 
 function startTopicMessage(config, telegram, topic, envelope) {
@@ -178,6 +412,14 @@ function startTopicMessage(config, telegram, topic, envelope) {
     displayedMessageCount: 0,
     telegramDeliveryCount: 0,
     lastModelError: undefined,
+    recoveredPromptTimeout: false,
+    topic: {
+      name: topic.name,
+      agent: topic.agent,
+      sessionId: topic.session_id,
+    },
+    envelope: serializeQueueEnvelope(envelope),
+    startedAt: new Date().toISOString(),
     pending: [],
     pendingDrained: false,
     displayQueue: Promise.resolve(),
@@ -211,6 +453,7 @@ function startTopicMessage(config, telegram, topic, envelope) {
       topicId: envelope.topicId,
       replyToMessageId: envelope.messageId,
       text: `Failed to handle message for ${topic.name}: ${error.message}`,
+      quote: true,
     }).catch((sendError) => {
       console.error(`failure response failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${sendError.message}`);
     });
@@ -223,8 +466,12 @@ function dispatchTopicRun(config, telegram, inFlight, topic, envelope, pending =
   const run = startTopicMessage(config, telegram, topic, envelope);
   run.pending.push(...pending);
   inFlight.set(key, run);
+  markPendingQueueDirty();
   run.promise.finally(() => {
-    if (inFlight.get(key) === run) inFlight.delete(key);
+    if (inFlight.get(key) === run) {
+      inFlight.delete(key);
+      markPendingQueueDirty();
+    }
     drainPendingEnvelopes(config, telegram, inFlight, topic, run);
   });
   return run;
@@ -238,9 +485,11 @@ function drainPendingEnvelopes(config, telegram, inFlight, topic, run) {
   const active = inFlight.get(key);
   if (active && active !== run) {
     active.pending.push(...queued);
+    markPendingQueueDirty();
     return;
   }
   const [next, ...rest] = queued;
+  markPendingQueueDirty();
   console.error(`dispatching queued message chat=${next.chatId} topic=${next.topicId} agent=${topic.agent} message=${next.messageId} remaining=${rest.length}`);
   dispatchTopicRun(config, telegram, inFlight, topic, next, rest);
 }
@@ -251,17 +500,29 @@ function drainPendingEnvelopes(config, telegram, inFlight, topic, run) {
 // message was heard and will be answered later.
 async function queueEnvelopeForRun(config, telegram, inFlight, topic, run, envelope) {
   run.pending.push(envelope);
+  markPendingQueueDirty();
   console.error(`queued message chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${envelope.messageId}`);
   if (run.pendingDrained) {
     drainPendingEnvelopes(config, telegram, inFlight, topic, run);
   }
-  await telegram.setMessageReaction({
+  if (envelope.queueAck === false) return;
+  await setLoggedMessageReaction(telegram, {
     chatId: envelope.chatId,
     messageId: envelope.messageId,
     emoji: "👀",
+    topicId: envelope.topicId,
+    agent: topic.agent,
+    reason: "message_queued",
   }).catch((error) => {
     console.error(`queued-message reaction failed chat=${envelope.chatId} message=${envelope.messageId}: ${error.message}`);
   });
+}
+
+async function setLoggedMessageReaction(telegram, { chatId, topicId, messageId, emoji, agent, reason }) {
+  console.error(`setting reaction chat=${chatId} topic=${topicId || "none"} message=${messageId} agent=${agent || "unknown"} emoji=${emoji || "none"} reason=${reason || "unspecified"}`);
+  const result = await telegram.setMessageReaction({ chatId, messageId, emoji });
+  console.error(`set reaction chat=${chatId} topic=${topicId || "none"} message=${messageId} agent=${agent || "unknown"} emoji=${emoji || "none"} reason=${reason || "unspecified"}`);
+  return result;
 }
 
 async function steerRunningTopic(config, telegram, inFlight, topic, envelope, active) {
@@ -272,6 +533,7 @@ async function steerRunningTopic(config, telegram, inFlight, topic, envelope, ac
       topicId: envelope.topicId,
       replyToMessageId: envelope.messageId,
       text: `Cannot compact ${topic.name} while it is running. Send /compact after the current run finishes.`,
+      quote: true,
     }).catch((error) => {
       console.error(`busy compact response failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.message}`);
     });
@@ -292,6 +554,37 @@ async function steerRunningTopic(config, telegram, inFlight, topic, envelope, ac
     console.error(`steering unavailable chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.message}`);
     await queueEnvelopeForRun(config, telegram, inFlight, topic, active, hydratedEnvelope);
   }
+}
+
+function shouldRecoverRpcPromptTimeout(result, active, envelope) {
+  return Boolean(
+    !result.ok &&
+    result.code === 1 &&
+    /Timeout waiting for response to prompt/i.test(result.stderr || "") &&
+    !active.recoveredPromptTimeout &&
+    envelope.source !== AUTO_RETRY_SOURCE,
+  );
+}
+
+async function unlinkTopicSessionWithCli(topic, newSessionId) {
+  const args = [
+    resolve("bin/telepi.js"),
+    "-c", configPath || "config/telepi.yaml",
+    "session:unlink",
+    "--name", topic.name,
+    "--session-id", newSessionId,
+    "--reason", "Automatic recovery after pi RPC prompt timeout",
+  ];
+  await execFileAsync(process.execPath, args, { cwd: resolve(".") });
+  return { ok: true };
+}
+
+function freshSessionIdForTopic(topic, date = new Date()) {
+  return `${topic.agent}-${topic.topic_id}-${compactTimestamp(date)}`;
+}
+
+function compactTimestamp(date) {
+  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 }
 
 async function handleTopicMessage(config, telegram, topic, envelope, active) {
@@ -329,6 +622,7 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
     active.resolveReady();
     result = await piRun.promise;
   } finally {
+    stopWorkingIndicator();
     active.acceptsSteering = false;
     active.abort = undefined;
     active.steer = undefined;
@@ -337,16 +631,28 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
       console.error(`display queue failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
     });
     await clearCancelButton(telegram, active);
-    stopWorkingIndicator();
   }
   const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
   console.error(`completed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} ok=${result.ok} code=${result.code} duration=${durationSeconds}s`);
+  if (shouldRecoverRpcPromptTimeout(result, active, envelope)) {
+    const newSessionId = freshSessionIdForTopic(topic);
+    const recovered = await unlinkTopicSessionWithCli(topic, newSessionId).catch((error) => ({ ok: false, error }));
+    if (recovered.ok) {
+      topic.session_id = newSessionId;
+      active.recoveredPromptTimeout = true;
+      active.pending.unshift({ ...envelope, source: AUTO_RETRY_SOURCE });
+      console.error(`recovered rpc prompt timeout chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} new_session=${newSessionId}; retrying message=${envelope.messageId}`);
+      return;
+    }
+    console.error(`rpc prompt timeout recovery failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${recovered.error?.stack || recovered.error?.message || recovered.error}`);
+  }
   if (active.cancelled) {
     await sendLongMessage(telegram, {
       chatId: envelope.chatId,
       topicId: envelope.topicId,
       replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
       text: `Cancelled ${topic.name}.`,
+      quote: true,
     });
     return;
   }
@@ -359,6 +665,7 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
       topicId: envelope.topicId,
       replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
       text: `⚠️ ${topic.agent} hit a model error: ${active.lastModelError}`,
+      quote: true,
     });
     return;
   }
@@ -374,6 +681,7 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
     topicId: envelope.topicId,
     replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
     text,
+    quote: !result.ok || !output,
   });
 }
 
@@ -679,12 +987,15 @@ async function sendOrEditToolDisplayText(telegram, active, envelope, item) {
         chatId: String(latest.chat?.id || envelope.chatId),
         messageId: String(latest.message_id),
         text: item.text,
+        lastEditedAt: Date.now(),
       });
     }
     return;
   }
 
   if (existing.text === item.text) return;
+  const now = Date.now();
+  if (!item.final && now - (existing.lastEditedAt || 0) < TOOL_UPDATE_DEBOUNCE_MS) return;
   await editTelegramMessageText(telegram, {
     chatId: existing.chatId,
     messageId: existing.messageId,
@@ -692,6 +1003,7 @@ async function sendOrEditToolDisplayText(telegram, active, envelope, item) {
     replyMarkup: shouldKeepCancelButton(active, existing) ? cancelButtonMarkup(active.cancelToken) : undefined,
   });
   existing.text = item.text;
+  existing.lastEditedAt = Date.now();
 }
 
 function shouldKeepCancelButton(active, message) {
@@ -798,7 +1110,7 @@ function toolDisplayItemFromEvent(event) {
     const text = textFromPiContent(event.partialResult?.content) || firstTextValue(event.partialResult, ["text", "message"]);
     if (customType && text) {
       const title = customDisplayTitle(event.partialResult, customType);
-      return { type: `custom/${customType}`, text: formatCustomText(customType, text, title), toolCallId: event.toolCallId };
+      return { type: `custom/${customType}`, text: formatCustomText(customType, text, title), toolCallId: event.toolCallId, final: false };
     }
   }
   if (event.type === "tool_execution_end") {
@@ -806,7 +1118,7 @@ function toolDisplayItemFromEvent(event) {
     const text = textFromPiContent(event.result?.content) || firstTextValue(event.result, ["text", "message"]);
     if (customType && text) {
       const title = customDisplayTitle(event.result, customType);
-      return { type: `custom/${customType}`, text: formatCustomText(customType, text, title), toolCallId: event.toolCallId };
+      return { type: `custom/${customType}`, text: formatCustomText(customType, text, title), toolCallId: event.toolCallId, final: true };
     }
   }
   if (event.type === "message_end" && /tool/i.test(String(event.message?.role || ""))) {
@@ -976,14 +1288,28 @@ async function handleCompactCommand(config, telegram, topic, envelope, instructi
   const startedAt = Date.now();
   const stopWorkingIndicator = startWorkingIndicator(config, telegram, topic, envelope);
   try {
-    const result = await compactPiSession(config, topic, instructions);
+    // Compaction uses pi's SDK. Run it behind the telepi CLI process boundary so
+    // a long-lived gateway never retains an SDK/model registry from before a pi update.
+    const outcome = await compactTopicSessionWithCli(topic, instructions);
     const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    if (outcome.status === "skipped") {
+      console.error(`compact skipped chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} duration=${durationSeconds}s reason=${JSON.stringify(outcome.reason)}`);
+      await sendLongMessage(telegram, {
+        chatId: envelope.chatId,
+        topicId: envelope.topicId,
+        replyToMessageId: envelope.messageId,
+        text: `Compaction skipped for ${topic.name}: ${outcome.reason}`,
+        quote: true,
+      });
+      return;
+    }
     console.error(`compacted chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} duration=${durationSeconds}s`);
     await sendLongMessage(telegram, {
       chatId: envelope.chatId,
       topicId: envelope.topicId,
       replyToMessageId: envelope.messageId,
-      text: `Compacted ${topic.name}.\n\nKept from entry: ${result.firstKeptEntryId}\nTokens before: ${result.tokensBefore}`,
+      text: `Compacted ${topic.name}.\n\nKept from entry: ${outcome.result.firstKeptEntryId}\nTokens before: ${outcome.result.tokensBefore}`,
+      quote: true,
     });
   } catch (error) {
     const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
@@ -993,9 +1319,42 @@ async function handleCompactCommand(config, telegram, topic, envelope, instructi
       topicId: envelope.topicId,
       replyToMessageId: envelope.messageId,
       text: `Compact failed for ${topic.name}: ${error.message}`,
+      quote: true,
     });
   } finally {
     stopWorkingIndicator();
+  }
+}
+
+async function compactTopicSessionWithCli(topic, instructions) {
+  const args = [
+    resolve("bin/telepi.js"),
+    "-c", configPath || "config/telepi.yaml",
+    "session:compact",
+    "--topic", topic.name,
+    "--json",
+  ];
+  if (instructions) args.push("--instructions", instructions);
+
+  try {
+    const { stdout } = await execFileAsync(process.execPath, args, {
+      cwd: resolve("."),
+      maxBuffer: 1024 * 1024,
+    });
+    const line = stdout.trim().split("\n").filter(Boolean).at(-1);
+    if (!line) throw new Error("compaction worker returned no result");
+    const outcome = JSON.parse(line);
+    if (outcome.status !== "compacted" && outcome.status !== "skipped") {
+      throw new Error(`compaction worker returned unknown status: ${outcome.status}`);
+    }
+    return outcome;
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error(`compaction worker returned invalid JSON: ${error.message}`);
+    }
+    const workerMessage = String(error.stderr || "").trim().split("\n").filter(Boolean).at(-1);
+    if (workerMessage) throw new Error(workerMessage);
+    throw error;
   }
 }
 
@@ -1003,26 +1362,147 @@ function startWorkingIndicator(config, telegram, topic, envelope) {
   if (config.telegram.working_indicator !== "typing") return () => undefined;
 
   let stopped = false;
+  const key = `${envelope.chatId}:${envelope.topicId || ""}`;
   const sendTyping = () => {
     if (stopped) return;
-    telegram.sendChatAction({
+    sendCoalescedTyping(telegram, key, {
       chatId: envelope.chatId,
       topicId: envelope.topicId,
       action: "typing",
-    }).catch((error) => {
+    }, (error) => {
       console.error(`typing indicator failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.message}`);
     });
   };
 
   sendTyping();
   const burstTimer = setTimeout(sendTyping, 750);
-  const intervalMs = Math.min(2, Math.max(1, Number(config.telegram.typing_interval_seconds || 2))) * 1000;
+  const intervalMs = Math.min(5, Math.max(1, Number(config.telegram.typing_interval_seconds || 5))) * 1000;
   const timer = setInterval(sendTyping, intervalMs);
   return () => {
     stopped = true;
+    clearCoalescedTyping(key);
     clearTimeout(burstTimer);
     clearInterval(timer);
   };
+}
+
+function sendCoalescedTyping(telegram, key, payload, onError) {
+  let state = typingByTopic.get(key);
+  if (!state) {
+    state = { inFlight: false, pending: undefined };
+    typingByTopic.set(key, state);
+  }
+  state.pending = { payload, onError };
+  pumpCoalescedTyping(telegram, key, state);
+}
+
+function clearCoalescedTyping(key) {
+  const state = typingByTopic.get(key);
+  if (!state) return;
+  state.pending = undefined;
+  if (!state.inFlight) typingByTopic.delete(key);
+}
+
+function pumpCoalescedTyping(telegram, key, state) {
+  if (state.inFlight || !state.pending) return;
+  const next = state.pending;
+  state.pending = undefined;
+  state.inFlight = true;
+  telegram.sendChatAction(next.payload)
+    .catch((error) => next.onError?.(error))
+    .finally(() => {
+      state.inFlight = false;
+      if (state.pending) {
+        pumpCoalescedTyping(telegram, key, state);
+      } else {
+        typingByTopic.delete(key);
+      }
+    });
+}
+
+function initPendingQueuePersistence(config, inFlight) {
+  const queuePath = resolve(config.project.cache_dir, "gateway-inflight-debug.json");
+  mkdirSync(resolve(config.project.cache_dir), { recursive: true });
+  queuePersistence = {
+    path: queuePath,
+    inFlight,
+    dirty: false,
+    timer: setInterval(() => flushPendingQueueSnapshot("interval", { force: true, quiet: true }), 60_000),
+    exiting: false,
+  };
+  queuePersistence.timer.unref?.();
+  process.once("SIGINT", () => exitAfterQueueSnapshot("SIGINT"));
+  process.once("SIGTERM", () => exitAfterQueueSnapshot("SIGTERM"));
+  process.once("exit", () => flushPendingQueueSnapshot("exit", { force: true, quiet: true }));
+}
+
+function markPendingQueueDirty() {
+  if (queuePersistence) queuePersistence.dirty = true;
+}
+
+function exitAfterQueueSnapshot(signal) {
+  if (queuePersistence?.exiting) return;
+  if (queuePersistence) queuePersistence.exiting = true;
+  flushPendingQueueSnapshot(signal, { force: true });
+  process.exit(0);
+}
+
+function flushPendingQueueSnapshot(reason, options = {}) {
+  if (!queuePersistence) return;
+  if (!options.force && !queuePersistence.dirty) return;
+  const snapshot = serializePendingQueue(queuePersistence.inFlight);
+  writePendingQueueSnapshot(queuePersistence.path, snapshot);
+  queuePersistence.dirty = false;
+  if (!options.quiet) {
+    console.error(`persisted gateway inflight debug snapshot reason=${reason} active=${snapshot.active.length} pending=${snapshot.pendingCount}`);
+  }
+}
+
+function serializePendingQueue(inFlight) {
+  const active = [];
+  for (const [key, run] of inFlight.entries()) {
+    const [chatId, topicId = ""] = key.split(":");
+    active.push({
+      key,
+      chatId,
+      topicId,
+      topic: run.topic,
+      startedAt: run.startedAt,
+      ageSeconds: run.startedAt ? Math.max(0, Math.round((Date.now() - Date.parse(run.startedAt)) / 1000)) : null,
+      acceptsSteering: Boolean(run.acceptsSteering),
+      cancelled: Boolean(run.cancelled),
+      readySettled: Boolean(run.readySettled),
+      readyError: run.readyError ? String(run.readyError.stack || run.readyError.message || run.readyError) : null,
+      displayedMessageCount: run.displayedMessageCount || 0,
+      telegramDeliveryCount: run.telegramDeliveryCount || 0,
+      lastModelError: run.lastModelError || null,
+      active: run.envelope,
+      pending: (run.pending || []).map(serializeQueueEnvelope),
+    });
+  }
+  return {
+    version: 2,
+    purpose: "debug snapshot only; not restored or replayed by gateway",
+    updatedAt: new Date().toISOString(),
+    active,
+    pendingCount: active.reduce((sum, item) => sum + item.pending.length, 0),
+  };
+}
+
+function serializeQueueEnvelope(envelope) {
+  return {
+    ...envelope,
+    chatId: envelope.chatId == null ? envelope.chatId : String(envelope.chatId),
+    topicId: envelope.topicId == null ? envelope.topicId : String(envelope.topicId),
+    messageId: envelope.messageId == null ? envelope.messageId : String(envelope.messageId),
+    userId: envelope.userId == null ? envelope.userId : String(envelope.userId),
+  };
+}
+
+function writePendingQueueSnapshot(path, snapshot) {
+  const tmpPath = `${path}.tmp`;
+  writeFileSync(tmpPath, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
+  renameSync(tmpPath, path);
 }
 
 // Reaction updates carry only chat_id + message_id (no topic), so the gateway
@@ -1096,6 +1576,8 @@ async function handleMessageReaction(config, telegram, inFlight, reaction) {
     messageId,
     userId,
     userName: reaction.user?.first_name || "user",
+    source: "telegram_reaction",
+    queueAck: false,
     text: `[Telegram reaction] The user ${parts.join(" and ")} on your earlier message${record.text ? `: "${record.text}"` : ""}. A reaction is a lightweight gesture — usually it needs at most a short acknowledgment or a reaction back, and often no reply at all beyond a word.`,
   };
   console.error(`reaction chat=${chatId} topic=${record.topic_id} message=${messageId} ${parts.join("; ")}`);
@@ -1112,13 +1594,15 @@ async function sendLongMessage(telegram, message) {
   const chunks = splitMessage(message.text);
   const sentMessages = [];
   for (const [index, chunk] of chunks.entries()) {
-    const converted = toTelegramMarkdownV2(chunk);
+    const quoted = Boolean(message.quote);
+    const converted = quoted ? null : toTelegramMarkdownV2(chunk);
     const payload = {
       chatId: message.chatId,
       topicId: message.topicId,
       replyToMessageId: index === 0 ? message.replyToMessageId : undefined,
       text: converted ?? chunk,
       parseMode: converted ? "MarkdownV2" : undefined,
+      entities: quoted ? blockquoteEntities(chunk) : undefined,
       replyMarkup: index === chunks.length - 1 ? message.replyMarkup : undefined,
     };
     try {
@@ -1130,6 +1614,11 @@ async function sendLongMessage(telegram, message) {
       } else if (payload.replyToMessageId && /reply|replied|message to be replied/i.test(error.message)) {
         console.error(`reply target unavailable chat=${message.chatId} topic=${message.topicId} message=${payload.replyToMessageId}; retrying without reply`);
         const sent = await sendTelegramMessageOrDropOnRateLimit(telegram, { ...payload, replyToMessageId: undefined }, message);
+        if (!sent) break;
+        sentMessages.push(sent);
+      } else if (payload.entities && /entities|entity/i.test(error.message)) {
+        console.error(`blockquote entity failed chat=${message.chatId} topic=${message.topicId}; retrying as plain text: ${error.message}`);
+        const sent = await sendTelegramMessageOrDropOnRateLimit(telegram, { ...payload, entities: undefined }, message);
         if (!sent) break;
         sentMessages.push(sent);
       } else if (payload.parseMode && /parse entities|can't parse entities|reserved and must be escaped/i.test(error.message)) {
@@ -1158,13 +1647,13 @@ async function sendTelegramMessageOrDropOnRateLimit(telegram, payload, originalM
   }
 }
 
-async function sendMessageWithRateLimitRetry(telegram, payload, maxRetries = 3) {
+async function sendMessageWithRateLimitRetry(telegram, payload, maxRetries = 1) {
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await telegram.sendMessage(payload);
     } catch (error) {
       const delayMs = rateLimitDelayMs(error);
-      if (delayMs == null || attempt >= maxRetries) throw error;
+      if (delayMs == null || attempt >= maxRetries || delayMs > MAX_GATEWAY_RATE_LIMIT_RETRY_MS) throw error;
       console.error(`send message rate limited chat=${payload.chatId} topic=${payload.topicId}; waiting ${delayMs}ms: ${error.message}`);
       await sleep(delayMs);
     }
