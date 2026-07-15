@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, realpathSync } from "node:fs";
-import { resolve } from "node:path";
-import { dirname } from "node:path";
+import { closeSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getAgent, getBotToken, resolveEntityDir, resolvePath, resolveTopicModel } from "./config.js";
 
@@ -20,6 +19,8 @@ export async function startPiForTopic(config, topic, envelope, options = {}) {
     onEvent: options.onEvent,
     env: spec.env,
     initialMessage: spec.initialMessage,
+    sessionDir: config.project.sessions_dir,
+    sessionId: spec.sessionId,
     steerMessage: (steerEnvelope) => formatTelegramMessage(topic, withAliasName(config, steerEnvelope)),
   });
 }
@@ -155,7 +156,22 @@ function formatAttachment(attachment) {
   ].filter(Boolean).join("\n");
 }
 
-async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = {}, onText, onEvent, initialMessage, steerMessage }) {
+async function startRpcProcess(args, {
+  cwd,
+  idleTimeoutMs,
+  hardTimeoutMs,
+  env = {},
+  onText,
+  onEvent,
+  initialMessage,
+  steerMessage,
+  sessionDir,
+  sessionId,
+}) {
+  // Capture the pre-prompt byte boundary. Pi persists messages before all RPC
+  // lifecycle events have necessarily escaped the process, so the transcript
+  // is the authoritative fallback when RPC wedges after writing a final answer.
+  const transcriptCursor = createSessionTranscriptCursor(sessionDir, sessionId);
   const { RpcClient } = await loadPiModule();
   const client = new RpcClient({
     cliPath: resolvePiCliPath(),
@@ -166,17 +182,19 @@ async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = 
   await client.start();
 
   let unsubscribe;
-  let pendingSteers = 0;
   let terminalSettleTimer;
   const promise = new Promise((resolvePromise) => {
     let stdout = "";
     let streamedTextCount = 0;
     let textQueue = Promise.resolve();
     let textDeliveryError = "";
+    let terminalTranscriptText = "";
+    const deliveredTexts = new Set();
     let streamedAssistantParts = [];
     let initialUserMessageSeen = false;
     let settled = false;
     let idleTimer;
+    let transcriptTimer;
     const timeoutRun = (message) => {
       if (settled) return;
       settled = true;
@@ -188,7 +206,7 @@ async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = 
           resolvePromise({
             ok: false,
             code: null,
-            stdout: outputTextFromJson(stdout),
+            stdout: outputTextFromJson(stdout) || terminalTranscriptText,
             stderr: message,
             streamedTextCount,
           });
@@ -224,16 +242,19 @@ async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = 
       clearTimeout(idleTimer);
       clearTimeout(hardTimer);
       clearTimeout(terminalSettleTimer);
+      clearInterval(transcriptTimer);
       unsubscribe?.();
       unsubscribe = undefined;
     };
 
     const enqueueText = (text) => {
-      if (!text || !onText) return;
+      const normalized = String(text || "").trim();
+      if (!normalized || !onText || deliveredTexts.has(normalized)) return;
+      deliveredTexts.add(normalized);
       streamedTextCount += 1;
       textQueue = textQueue
         .catch(() => undefined)
-        .then(() => onText(text))
+        .then(() => onText(normalized))
         .catch((error) => {
           textDeliveryError = error.message;
           console.error(`pi assistant text delivery failed: ${error.stack || error.message}`);
@@ -241,23 +262,39 @@ async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = 
     };
 
     // A completed final assistant message should be followed immediately by
-    // agent_end/agent_settled. If pi wedges after persisting that answer, keep
-    // the process briefly for any already-accepted steering message, then close
-    // only the completed lifecycle—not an actively reasoning/tool-using turn.
+    // agent_end/agent_settled. If pi wedges after persisting that answer, allow
+    // a grace period and then close only that completed lifecycle—not an
+    // actively reasoning/tool-using turn. Gateway-owned steers not confirmed by
+    // a transcript user message are replayed after this run closes.
     const scheduleTerminalSettle = () => {
       clearTimeout(terminalSettleTimer);
-      if (pendingSteers > 0 || settled) return;
+      if (settled) return;
       terminalSettleTimer = setTimeout(() => {
         console.error("pi emitted a terminal assistant message but did not settle; closing completed run");
         void finish({
           ok: true,
           code: 0,
-          stdout: outputTextFromJson(stdout),
+          stdout: outputTextFromJson(stdout) || terminalTranscriptText,
           stderr: client.getStderr().trim(),
           streamedTextCount,
         });
       }, 60_000);
     };
+
+    const pollTranscript = () => {
+      for (const entry of readSessionTranscriptEntries(transcriptCursor)) {
+        const message = entry?.type === "message" ? entry.message : null;
+        if (message?.role !== "assistant" || message.stopReason !== "stop") continue;
+        const finalText = textFromPiContent(message.content).trim();
+        if (!finalText) continue;
+        terminalTranscriptText = finalText;
+        enqueueText(finalText);
+        scheduleTerminalSettle();
+      }
+    };
+    transcriptTimer = setInterval(pollTranscript, 500);
+    transcriptTimer.unref?.();
+    pollTranscript();
 
     unsubscribe = client.onEvent((event) => {
       refreshIdleTimer();
@@ -270,7 +307,6 @@ async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = 
       }
       if (event.type === "message_start" && event.message?.role === "user") {
         if (initialUserMessageSeen) {
-          pendingSteers = Math.max(0, pendingSteers - 1);
           clearTimeout(terminalSettleTimer);
         } else {
           initialUserMessageSeen = true;
@@ -299,7 +335,7 @@ async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = 
         void finish({
           ok: true,
           code: 0,
-          stdout: outputTextFromJson(stdout),
+          stdout: outputTextFromJson(stdout) || terminalTranscriptText,
           stderr: client.getStderr().trim(),
           streamedTextCount,
         });
@@ -310,7 +346,7 @@ async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = 
       void finish({
         ok: false,
         code: 1,
-        stdout: outputTextFromJson(stdout),
+        stdout: outputTextFromJson(stdout) || terminalTranscriptText,
         stderr: `${error.message}${client.getStderr() ? `\n${client.getStderr().trim()}` : ""}`.trim(),
         streamedTextCount,
       });
@@ -323,16 +359,83 @@ async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = 
       await client.abort();
     },
     steer: async (envelope) => {
-      pendingSteers += 1;
-      clearTimeout(terminalSettleTimer);
-      try {
-        await client.steer(steerMessage(envelope));
-      } catch (error) {
-        pendingSteers = Math.max(0, pendingSteers - 1);
-        throw error;
-      }
+      await client.steer(steerMessage(envelope));
     },
   };
+}
+
+function createSessionTranscriptCursor(sessionDir, sessionId) {
+  const path = findSessionTranscriptFile(sessionDir, sessionId);
+  return {
+    sessionDir,
+    sessionId: String(sessionId || ""),
+    path,
+    offset: path ? statSync(path).size : 0,
+    pending: Buffer.alloc(0),
+  };
+}
+
+function findSessionTranscriptFile(sessionDir, sessionId) {
+  if (!sessionDir || !sessionId) return null;
+  try {
+    const candidates = readdirSync(sessionDir)
+      .filter((name) => name.endsWith(".jsonl"))
+      .map((name) => resolve(sessionDir, name))
+      .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+    for (const path of candidates) {
+      const fd = openSync(path, "r");
+      try {
+        const buffer = Buffer.alloc(4096);
+        const length = readSync(fd, buffer, 0, buffer.length, 0);
+        const newline = buffer.indexOf(0x0a, 0);
+        const header = parseJsonLine(buffer.subarray(0, newline >= 0 ? newline : length).toString("utf8"));
+        if (header?.type === "session" && String(header.id) === String(sessionId)) return path;
+      } finally {
+        closeSync(fd);
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function readSessionTranscriptEntries(cursor) {
+  try {
+    if (!cursor.path) {
+      cursor.path = findSessionTranscriptFile(cursor.sessionDir, cursor.sessionId);
+      if (!cursor.path) return [];
+      cursor.offset = 0;
+    }
+    const size = statSync(cursor.path).size;
+    if (size <= cursor.offset) return [];
+    const buffer = Buffer.alloc(size - cursor.offset);
+    const fd = openSync(cursor.path, "r");
+    let length = 0;
+    try {
+      while (length < buffer.length) {
+        const count = readSync(fd, buffer, length, buffer.length - length, cursor.offset + length);
+        if (!count) break;
+        length += count;
+      }
+    } finally {
+      closeSync(fd);
+    }
+    cursor.offset += length;
+    let unread = Buffer.concat([cursor.pending, buffer.subarray(0, length)]);
+    const entries = [];
+    let newline;
+    while ((newline = unread.indexOf(0x0a)) >= 0) {
+      const line = unread.subarray(0, newline).toString("utf8");
+      unread = unread.subarray(newline + 1);
+      const entry = parseJsonLine(line);
+      if (entry) entries.push(entry);
+    }
+    cursor.pending = Buffer.from(unread);
+    return entries;
+  } catch {
+    return [];
+  }
 }
 
 function textFromPiContent(content) {
