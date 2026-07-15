@@ -137,6 +137,8 @@ telepi agent:display-messages --id <agent> --set assistant/message assistant/rea
 telepi agent:display-messages --id <agent> --clear
 ```
 
+Enabled `assistant/reasoning` updates are coalesced into one italic Telegram message per user turn. Later reasoning summaries edit and append to that message instead of creating a noisy sequence; a continuation is used only if Telegram's message-size limit is reached.
+
 ## Formatting
 
 Outbound messages are converted from model markdown to Telegram MarkdownV2 using a vendored copy of [telegram-markdown-v2](https://github.com/AndyRightNow/telegram-markdown-v2) (see `vendor/`). If conversion fails or inflates a chunk past Telegram's 4096-char limit, the chunk is sent as plain text instead — models are never restricted in what they can output.

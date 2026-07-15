@@ -424,6 +424,7 @@ function startTopicMessage(config, telegram, topic, envelope) {
     steered: [],
     pendingDrained: false,
     displayQueue: Promise.resolve(),
+    reasoningDisplayMessage: undefined,
     toolDisplayMessages: new Map(),
     ready: undefined,
     readyError: undefined,
@@ -616,20 +617,24 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
   const stopWorkingIndicator = startWorkingIndicator(config, telegram, topic, envelope);
   const displayMessages = configuredDisplayMessages(config, topic);
   const useDefaultAssistantDisplay = !hasConfiguredDisplayMessages(config, topic);
+  const streamAssistantMessages = useDefaultAssistantDisplay || isDisplayMessageAllowed(displayMessages, "assistant/message");
   let result;
   try {
     const piRun = await startPiForTopic(config, topic, envelope, {
-      onText: useDefaultAssistantDisplay
-        ? (text) => sendStreamingText(telegram, active, envelope, text)
+      onText: streamAssistantMessages
+        ? (text) => queueAssistantTextDisplay(telegram, active, envelope, text)
         : undefined,
       onEvent: (event) => {
         acknowledgeSteeredEnvelope(active, event);
+        resetReasoningDisplayFromPiEvent(active, event);
         updateReplyAnchorFromPiEvent(active, event);
         if (isTelegramDeliveryEvent(event)) active.telegramDeliveryCount += 1;
         const modelError = modelErrorFromPiEvent(event);
         if (modelError) active.lastModelError = modelError;
         if (!useDefaultAssistantDisplay) {
-          queueDisplayPiEvent(config, telegram, active, envelope, event, displayMessages);
+          queueDisplayPiEvent(config, telegram, active, envelope, event, displayMessages, {
+            excludeTypes: streamAssistantMessages ? ["assistant/message"] : [],
+          });
         }
       },
     });
@@ -978,8 +983,17 @@ async function sendStreamingText(telegram, active, envelope, text, options = {})
   return sentMessages;
 }
 
-function queueDisplayPiEvent(config, telegram, active, envelope, event, displayMessages) {
-  const items = displayItemsFromPiEvent(event).filter((item) => isDisplayMessageAllowed(displayMessages, item.type));
+function queueAssistantTextDisplay(telegram, active, envelope, text) {
+  active.displayQueue = active.displayQueue
+    .catch(() => undefined)
+    .then(() => sendStreamingText(telegram, active, envelope, text));
+  return active.displayQueue;
+}
+
+function queueDisplayPiEvent(config, telegram, active, envelope, event, displayMessages, options = {}) {
+  const excluded = new Set(options.excludeTypes || []);
+  const items = displayItemsFromPiEvent(event)
+    .filter((item) => !excluded.has(item.type) && isDisplayMessageAllowed(displayMessages, item.type));
   for (const item of items) {
     active.displayQueue = active.displayQueue
       .catch(() => undefined)
@@ -988,11 +1002,51 @@ function queueDisplayPiEvent(config, telegram, active, envelope, event, displayM
 }
 
 async function displayPiItem(telegram, active, envelope, item) {
+  if (item.type === "assistant/reasoning") {
+    await sendOrAppendReasoningDisplayText(telegram, active, envelope, item);
+    return;
+  }
   if (item.toolCallId) {
     await sendOrEditToolDisplayText(telegram, active, envelope, item);
     return;
   }
   await sendStreamingText(telegram, active, envelope, item.text, { italic: item.italic });
+}
+
+async function sendOrAppendReasoningDisplayText(telegram, active, envelope, item) {
+  const existing = active.reasoningDisplayMessage;
+  if (!existing) {
+    const sentMessages = await sendStreamingText(telegram, active, envelope, item.text, { italic: true });
+    const latest = sentMessages.at(-1);
+    if (latest?.message_id) {
+      active.reasoningDisplayMessage = {
+        chatId: String(latest.chat?.id || envelope.chatId),
+        messageId: String(latest.message_id),
+        text: item.text,
+        parts: [item.text],
+      };
+    }
+    return;
+  }
+
+  if (existing.parts.includes(item.text)) return;
+  const combined = `${existing.text}\n\n${item.text}`;
+  // Telegram cannot hold more than 4096 UTF-16 code units in one message.
+  // Start a continuation only when a turn's reasoning genuinely exceeds it.
+  if (combined.length > 3900) {
+    active.reasoningDisplayMessage = undefined;
+    await sendOrAppendReasoningDisplayText(telegram, active, envelope, item);
+    return;
+  }
+  await editTelegramMessageText(telegram, {
+    chatId: existing.chatId,
+    messageId: existing.messageId,
+    text: combined,
+    italic: true,
+    replyMarkup: shouldKeepCancelButton(active, existing) ? cancelButtonMarkup(active.cancelToken) : undefined,
+  });
+  existing.text = combined;
+  existing.parts.push(item.text);
 }
 
 async function sendOrEditToolDisplayText(telegram, active, envelope, item) {
@@ -1221,6 +1275,17 @@ function acknowledgeSteeredEnvelope(active, event) {
   if (index < 0) return;
   active.steered.splice(index, 1);
   markPendingQueueDirty();
+}
+
+function resetReasoningDisplayFromPiEvent(active, event) {
+  if (event?.type !== "message_start" || event.message?.role !== "user") return;
+  // Keep the reset ordered after any reasoning edits already queued for the
+  // preceding turn, especially when a steering message arrives quickly.
+  active.displayQueue = active.displayQueue
+    .catch(() => undefined)
+    .then(() => {
+      active.reasoningDisplayMessage = undefined;
+    });
 }
 
 function updateReplyAnchorFromPiEvent(active, event) {
@@ -1703,20 +1768,22 @@ function sleep(ms) {
 
 async function editTelegramMessageText(telegram, message) {
   const text = message.text.length > 3900 ? `${message.text.slice(0, 3890)}\n[truncated]` : message.text;
-  const converted = toTelegramMarkdownV2(text);
+  const italic = Boolean(message.italic);
+  const converted = italic ? null : toTelegramMarkdownV2(text);
   const payload = {
     chatId: message.chatId,
     messageId: message.messageId,
     text: converted ?? text,
     parseMode: converted ? "MarkdownV2" : undefined,
+    entities: italic ? italicEntities(text) : undefined,
     replyMarkup: message.replyMarkup,
   };
   try {
     await telegram.editMessageText(payload);
   } catch (error) {
-    if (payload.parseMode && /parse entities|can't parse entities|reserved and must be escaped/i.test(error.message)) {
+    if ((payload.parseMode || payload.entities) && /parse entities|can't parse entities|reserved and must be escaped|entities|entity/i.test(error.message)) {
       try {
-        await telegram.editMessageText({ ...payload, parseMode: undefined, text });
+        await telegram.editMessageText({ ...payload, parseMode: undefined, entities: undefined, text });
       } catch (plainError) {
         if (isTelegramRateLimited(plainError)) {
           console.error(`edit message rate limited chat=${message.chatId} message=${message.messageId}: ${plainError.message}`);

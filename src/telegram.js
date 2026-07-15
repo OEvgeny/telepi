@@ -77,13 +77,14 @@ export class TelegramClient {
     }));
   }
 
-  async editMessageText({ chatId, messageId, text, parseMode, replyMarkup }) {
+  async editMessageText({ chatId, messageId, text, parseMode, entities, replyMarkup }) {
     return this.request("editMessageText", compact({
       chat_id: chatId,
       message_id: messageId,
       text,
       disable_web_page_preview: true,
       parse_mode: parseMode,
+      entities,
       reply_markup: replyMarkup,
     }));
   }
