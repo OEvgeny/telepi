@@ -9,7 +9,7 @@ import { TelegramClient, hydrateEnvelopeMedia, updateToEnvelope } from "./telegr
 import { parseCompactCommand } from "./pi-compact.js";
 import { normalizePromptInboxInterval, startPromptInboxPolling } from "./prompt-inbox.js";
 import { startPiForTopic } from "./pi-session.js";
-import { blockquoteEntities, toTelegramMarkdownV2 } from "./telegram-format.js";
+import { blockquoteEntities, italicEntities, toTelegramMarkdownV2 } from "./telegram-format.js";
 import { installTimestampedConsole } from "./logging.js";
 
 installTimestampedConsole();
@@ -944,7 +944,7 @@ function envelopeFromButtonCallback(query, callback) {
   };
 }
 
-async function sendStreamingText(telegram, active, envelope, text) {
+async function sendStreamingText(telegram, active, envelope, text, options = {}) {
   const previous = active.cancelMessage;
   active.cancelGeneration += 1;
   active.cancelMessage = undefined;
@@ -964,6 +964,7 @@ async function sendStreamingText(telegram, active, envelope, text) {
     topicId: envelope.topicId,
     replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
     text,
+    italic: options.italic,
   });
   const latest = sentMessages.at(-1);
   active.displayedMessageCount += sentMessages.length;
@@ -991,7 +992,7 @@ async function displayPiItem(telegram, active, envelope, item) {
     await sendOrEditToolDisplayText(telegram, active, envelope, item);
     return;
   }
-  await sendStreamingText(telegram, active, envelope, item.text);
+  await sendStreamingText(telegram, active, envelope, item.text, { italic: item.italic });
 }
 
 async function sendOrEditToolDisplayText(telegram, active, envelope, item) {
@@ -1098,12 +1099,8 @@ function assistantDisplayItemFromEvent(event) {
   }
   if (/reasoning|thinking/i.test(messageEvent.type)) {
     const text = firstTextValue(messageEvent, ["content", "text", "thinking", "reasoning"]);
-    const italicText = text
-      .replace(/\*\*|__/g, "")
-      .split("\n")
-      .map((line) => line ? `_${line}_` : "")
-      .join("\n");
-    return italicText ? { type: "assistant/reasoning", text: italicText } : null;
+    const italicText = text.replace(/\*\*|__/g, "");
+    return italicText ? { type: "assistant/reasoning", text: italicText, italic: true } : null;
   }
   if (/tool/i.test(messageEvent.type)) {
     const text = compactJson(messageEvent);
@@ -1628,14 +1625,15 @@ async function sendLongMessage(telegram, message) {
   const sentMessages = [];
   for (const [index, chunk] of chunks.entries()) {
     const quoted = Boolean(message.quote);
-    const converted = quoted ? null : toTelegramMarkdownV2(chunk);
+    const italic = Boolean(message.italic);
+    const converted = quoted || italic ? null : toTelegramMarkdownV2(chunk);
     const payload = {
       chatId: message.chatId,
       topicId: message.topicId,
       replyToMessageId: index === 0 ? message.replyToMessageId : undefined,
       text: converted ?? chunk,
       parseMode: converted ? "MarkdownV2" : undefined,
-      entities: quoted ? blockquoteEntities(chunk) : undefined,
+      entities: quoted ? blockquoteEntities(chunk) : italic ? italicEntities(chunk) : undefined,
       replyMarkup: index === chunks.length - 1 ? message.replyMarkup : undefined,
     };
     try {
@@ -1650,7 +1648,7 @@ async function sendLongMessage(telegram, message) {
         if (!sent) break;
         sentMessages.push(sent);
       } else if (payload.entities && /entities|entity/i.test(error.message)) {
-        console.error(`blockquote entity failed chat=${message.chatId} topic=${message.topicId}; retrying as plain text: ${error.message}`);
+        console.error(`message entity failed chat=${message.chatId} topic=${message.topicId}; retrying as plain text: ${error.message}`);
         const sent = await sendTelegramMessageOrDropOnRateLimit(telegram, { ...payload, entities: undefined }, message);
         if (!sent) break;
         sentMessages.push(sent);

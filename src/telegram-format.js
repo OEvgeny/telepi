@@ -21,7 +21,17 @@ export function toTelegramMarkdownV2(text) {
 }
 
 export function blockquoteEntities(text) {
+  return wholeTextEntity(text, "blockquote");
+}
+
+export function italicEntities(text) {
+  return wholeTextEntity(text, "italic");
+}
+
+function wholeTextEntity(text, type) {
   const value = String(text ?? "");
   if (!value) return undefined;
-  return [{ type: "blockquote", offset: 0, length: value.length }];
+  // Telegram entity offsets and JavaScript string lengths are both UTF-16
+  // code units, including for astral emoji represented by surrogate pairs.
+  return [{ type, offset: 0, length: value.length }];
 }
