@@ -130,7 +130,12 @@ telegram:
     - tool
 ```
 
-Category entries such as `assistant`, `custom`, or `tool` include all subtypes in that category. Specific entries such as `assistant/reasoning` or `custom/something` include only that subtype.
+Category entries such as `assistant`, `custom`, or `tool` include all subtypes in that category. Specific entries such as `assistant/reasoning` or `custom/something` include only that subtype. Agent overrides can be managed without hand-editing config:
+
+```bash
+telepi agent:display-messages --id <agent> --set assistant/message assistant/reasoning
+telepi agent:display-messages --id <agent> --clear
+```
 
 ## Formatting
 

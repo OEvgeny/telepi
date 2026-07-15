@@ -174,6 +174,33 @@ program
   });
 
 program
+  .command("agent:display-messages")
+  .description("List, set, or clear an agent's Telegram pi-event display allowlist")
+  .requiredOption("--id <id>", "Agent id")
+  .option("--set <type...>", "Replace the allowlist (for example: assistant/message assistant/reasoning)")
+  .option("--clear", "Remove the agent override and inherit the global Telegram setting")
+  .action((options) => {
+    const config = load();
+    const agent = config.agents[options.id];
+    if (!agent) throwCli(`unknown agent: ${options.id}`);
+    if (options.clear && options.set?.length) throwCli("use either --set or --clear");
+    if (options.clear) {
+      delete agent.display_messages;
+      save(config);
+      console.log(`cleared display message override for ${options.id}`);
+      return;
+    }
+    if (options.set) {
+      const values = [...new Set(options.set.map((value) => String(value).trim()).filter(Boolean))];
+      if (!values.length) throwCli("--set requires at least one message type");
+      agent.display_messages = values;
+      save(config);
+    }
+    const configured = agent.display_messages;
+    console.log(configured?.length ? configured.join("\n") : "(inherited)");
+  });
+
+program
   .command("agent:extensions")
   .description("List or modify an agent's pi extensions")
   .requiredOption("--id <id>", "Agent id")
