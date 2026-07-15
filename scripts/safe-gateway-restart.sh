@@ -8,7 +8,7 @@ SESSION_ID=""
 MODEL=""
 ENTITY_DIR=""
 WAIT_PID=""
-WAIT_TIMEOUT_SECONDS=600
+WAIT_TIMEOUT_SECONDS=0
 REASON="safe gateway restart"
 
 while [[ $# -gt 0 ]]; do
@@ -71,9 +71,9 @@ report_failure() {
 }
 
 if [[ -n "$WAIT_PID" && "$WAIT_PID" =~ ^[0-9]+$ ]]; then
-  deadline=$(( $(date +%s) + WAIT_TIMEOUT_SECONDS ))
+  started_waiting_at=$(date +%s)
   while kill -0 "$WAIT_PID" 2>/dev/null; do
-    if (( $(date +%s) >= deadline )); then
+    if (( WAIT_TIMEOUT_SECONDS > 0 && $(date +%s) - started_waiting_at >= WAIT_TIMEOUT_SECONDS )); then
       report_failure "⚠️ Safe gateway restart worker timed out waiting for pi process $WAIT_PID to exit. No restart attempted. Log: $ROOT/$LOG"
       exit 1
     fi
@@ -90,13 +90,14 @@ Reason: $REASON
 Do the full safe restart cycle now:
 1. Re-read the gateway restart skill and telepi-dev manual if needed.
 2. Verify the repository is in a sane state for restart (syntax/config checks if relevant and quick enough).
-3. Restart telepi-gateway.service.
+3. Run $ROOT/scripts/restart-gateway-when-idle.sh. This waits until the gateway cgroup has no child processes, then restarts telepi-gateway.service immediately.
 4. Verify systemd reports it active and .telepi/gateway.log contains a fresh "telepi gateway connected" line after the restart.
 5. Send the final result back with: node bin/telepi.js topic:send --topic "$TOPIC" --quote --text "..."
 
 Rules:
 - Do not use topic:prompt.
 - Do not schedule another restart worker.
+- Never call systemctl restart directly; use restart-gateway-when-idle.sh so active pi/tool processes are not killed.
 - Do not rely on Telegram tools; use bash and topic:send.
 - If verification fails, still report with topic:send including the failure and the last useful gateway log lines.
 - Keep the final Telegram report concise.
