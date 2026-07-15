@@ -4,6 +4,7 @@ set -euo pipefail
 SERVICE="telepi-gateway.service"
 TIMEOUT_SECONDS=0
 STABLE_SECONDS=2
+FORCE=false
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 CGROUP_ROOT="${CGROUP_ROOT:-/sys/fs/cgroup}"
 
@@ -12,6 +13,7 @@ while [[ $# -gt 0 ]]; do
     --service) SERVICE="$2"; shift 2 ;;
     --timeout-seconds) TIMEOUT_SECONDS="$2"; shift 2 ;;
     --stable-seconds) STABLE_SECONDS="$2"; shift 2 ;;
+    --force) FORCE=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -19,6 +21,12 @@ done
 if ! [[ "$TIMEOUT_SECONDS" =~ ^[0-9]+$ && "$STABLE_SECONDS" =~ ^[0-9]+$ ]]; then
   echo "timeout and stable seconds must be non-negative integers" >&2
   exit 2
+fi
+
+if [[ "$FORCE" == true ]]; then
+  echo "WARNING: forcing $SERVICE restart; active gateway child processes will be terminated" >&2
+  "$SYSTEMCTL_BIN" --user restart "$SERVICE"
+  exit 0
 fi
 
 started_at=$(date +%s)

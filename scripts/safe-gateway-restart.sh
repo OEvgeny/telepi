@@ -9,6 +9,7 @@ MODEL=""
 ENTITY_DIR=""
 WAIT_PID=""
 WAIT_TIMEOUT_SECONDS=0
+FORCE_RESTART=false
 REASON="safe gateway restart"
 
 while [[ $# -gt 0 ]]; do
@@ -18,6 +19,7 @@ while [[ $# -gt 0 ]]; do
     --model) MODEL="$2"; shift 2 ;;
     --wait-pid) WAIT_PID="$2"; shift 2 ;;
     --wait-timeout-seconds) WAIT_TIMEOUT_SECONDS="$2"; shift 2 ;;
+    --force) FORCE_RESTART=true; shift ;;
     --reason) REASON="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -81,6 +83,13 @@ if [[ -n "$WAIT_PID" && "$WAIT_PID" =~ ^[0-9]+$ ]]; then
   done
 fi
 
+RESTART_COMMAND="$ROOT/scripts/restart-gateway-when-idle.sh"
+RESTART_MODE_RULE="This is a normal drain-first restart. Do not add --force."
+if [[ "$FORCE_RESTART" == true ]]; then
+  RESTART_COMMAND+=" --force"
+  RESTART_MODE_RULE="This is an explicitly requested forced recovery restart. Active gateway child processes may be terminated."
+fi
+
 PROMPT=$(cat <<EOF
 /skill:telepi-gateway-restart
 You are the mapped topic agent running in a detached safe gateway restart worker, outside the telepi gateway cgroup.
@@ -90,14 +99,15 @@ Reason: $REASON
 Do the full safe restart cycle now:
 1. Re-read the gateway restart skill and telepi-dev manual if needed.
 2. Verify the repository is in a sane state for restart (syntax/config checks if relevant and quick enough).
-3. Run $ROOT/scripts/restart-gateway-when-idle.sh. This waits until the gateway cgroup has no child processes, then restarts telepi-gateway.service immediately.
+3. Run: $RESTART_COMMAND
+   $RESTART_MODE_RULE
 4. Verify systemd reports it active and .telepi/gateway.log contains a fresh "telepi gateway connected" line after the restart.
 5. Send the final result back with: node bin/telepi.js topic:send --topic "$TOPIC" --quote --text "..."
 
 Rules:
 - Do not use topic:prompt.
 - Do not schedule another restart worker.
-- Never call systemctl restart directly; use restart-gateway-when-idle.sh so active pi/tool processes are not killed.
+- Never call systemctl restart directly; use the exact restart-gateway-when-idle.sh command above.
 - Do not rely on Telegram tools; use bash and topic:send.
 - If verification fails, still report with topic:send including the failure and the last useful gateway log lines.
 - Keep the final Telegram report concise.
