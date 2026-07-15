@@ -421,6 +421,7 @@ function startTopicMessage(config, telegram, topic, envelope) {
     envelope: serializeQueueEnvelope(envelope),
     startedAt: new Date().toISOString(),
     pending: [],
+    steered: [],
     pendingDrained: false,
     displayQueue: Promise.resolve(),
     toolDisplayMessages: new Map(),
@@ -468,6 +469,13 @@ function dispatchTopicRun(config, telegram, inFlight, topic, envelope, pending =
   inFlight.set(key, run);
   markPendingQueueDirty();
   run.promise.finally(() => {
+    // A steer is only durable in pi's transcript after its user message_start.
+    // Replay any accepted-but-undelivered steers as ordinary queued messages
+    // instead of losing them when a wedged run is closed.
+    if (run.steered.length) {
+      run.pending.unshift(...run.steered.splice(0));
+      markPendingQueueDirty();
+    }
     if (inFlight.get(key) === run) {
       inFlight.delete(key);
       markPendingQueueDirty();
@@ -548,7 +556,15 @@ async function steerRunningTopic(config, telegram, inFlight, topic, envelope, ac
     await active.ready;
     if (active.readyError) throw active.readyError;
     if (!active.acceptsSteering || !active.steer) throw new Error("topic is not accepting steering");
-    await active.steer(hydratedEnvelope);
+    active.steered.push(hydratedEnvelope);
+    markPendingQueueDirty();
+    try {
+      await active.steer(hydratedEnvelope);
+    } catch (error) {
+      active.steered = active.steered.filter((item) => item !== hydratedEnvelope);
+      markPendingQueueDirty();
+      throw error;
+    }
     console.error(`steered chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${envelope.messageId}`);
   } catch (error) {
     console.error(`steering unavailable chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.message}`);
@@ -607,6 +623,7 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
         ? (text) => sendStreamingText(telegram, active, envelope, text)
         : undefined,
       onEvent: (event) => {
+        acknowledgeSteeredEnvelope(active, event);
         updateReplyAnchorFromPiEvent(active, event);
         if (isTelegramDeliveryEvent(event)) active.telegramDeliveryCount += 1;
         const modelError = modelErrorFromPiEvent(event);
@@ -1194,6 +1211,16 @@ function compactJson(value, maxLength = 1800) {
   }
 }
 
+function acknowledgeSteeredEnvelope(active, event) {
+  if (event?.type !== "message_start" || event.message?.role !== "user") return;
+  const messageId = telegramMessageIdFromPiMessage(event.message);
+  if (!messageId) return;
+  const index = active.steered.findIndex((envelope) => String(envelope.messageId) === String(messageId));
+  if (index < 0) return;
+  active.steered.splice(index, 1);
+  markPendingQueueDirty();
+}
+
 function updateReplyAnchorFromPiEvent(active, event) {
   if (event?.type !== "message_start" || event.message?.role !== "user") return;
   const messageId = telegramMessageIdFromPiMessage(event.message);
@@ -1478,6 +1505,7 @@ function serializePendingQueue(inFlight) {
       lastModelError: run.lastModelError || null,
       active: run.envelope,
       pending: (run.pending || []).map(serializeQueueEnvelope),
+      steeredAwaitingDelivery: (run.steered || []).map(serializeQueueEnvelope),
     });
   }
   return {

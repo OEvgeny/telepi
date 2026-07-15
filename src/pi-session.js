@@ -166,10 +166,15 @@ async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = 
   await client.start();
 
   let unsubscribe;
+  let pendingSteers = 0;
+  let terminalSettleTimer;
   const promise = new Promise((resolvePromise) => {
     let stdout = "";
     let streamedTextCount = 0;
     let textQueue = Promise.resolve();
+    let textDeliveryError = "";
+    let streamedAssistantParts = [];
+    let initialUserMessageSeen = false;
     let settled = false;
     let idleTimer;
     const timeoutRun = (message) => {
@@ -207,9 +212,10 @@ async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = 
       if (settled) return;
       settled = true;
       cleanup();
-      await textQueue.catch((error) => {
-        result.stderr = `${result.stderr ? `${result.stderr}\n` : ""}Streaming text delivery failed: ${error.message}`;
-      });
+      await textQueue;
+      if (textDeliveryError) {
+        result.stderr = `${result.stderr ? `${result.stderr}\n` : ""}Streaming text delivery failed: ${textDeliveryError}`;
+      }
       await client.stop();
       resolvePromise(result);
     };
@@ -217,8 +223,40 @@ async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = 
     const cleanup = () => {
       clearTimeout(idleTimer);
       clearTimeout(hardTimer);
+      clearTimeout(terminalSettleTimer);
       unsubscribe?.();
       unsubscribe = undefined;
+    };
+
+    const enqueueText = (text) => {
+      if (!text || !onText) return;
+      streamedTextCount += 1;
+      textQueue = textQueue
+        .catch(() => undefined)
+        .then(() => onText(text))
+        .catch((error) => {
+          textDeliveryError = error.message;
+          console.error(`pi assistant text delivery failed: ${error.stack || error.message}`);
+        });
+    };
+
+    // A completed final assistant message should be followed immediately by
+    // agent_end/agent_settled. If pi wedges after persisting that answer, keep
+    // the process briefly for any already-accepted steering message, then close
+    // only the completed lifecycle—not an actively reasoning/tool-using turn.
+    const scheduleTerminalSettle = () => {
+      clearTimeout(terminalSettleTimer);
+      if (pendingSteers > 0 || settled) return;
+      terminalSettleTimer = setTimeout(() => {
+        console.error("pi emitted a terminal assistant message but did not settle; closing completed run");
+        void finish({
+          ok: true,
+          code: 0,
+          stdout: outputTextFromJson(stdout),
+          stderr: client.getStderr().trim(),
+          streamedTextCount,
+        });
+      }, 60_000);
     };
 
     unsubscribe = client.onEvent((event) => {
@@ -226,14 +264,38 @@ async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = 
       onEvent?.(event);
       const line = JSON.stringify(event);
       stdout += `${line}\n`;
-      const streamedText = textFromJsonEvent(line);
-      if (streamedText && onText) {
-        streamedTextCount += 1;
-        textQueue = textQueue
-          .catch(() => undefined)
-          .then(() => onText(streamedText));
+
+      if (event.type === "message_start" && event.message?.role === "assistant") {
+        streamedAssistantParts = [];
       }
-      if (event.type === "agent_end") {
+      if (event.type === "message_start" && event.message?.role === "user") {
+        if (initialUserMessageSeen) {
+          pendingSteers = Math.max(0, pendingSteers - 1);
+          clearTimeout(terminalSettleTimer);
+        } else {
+          initialUserMessageSeen = true;
+        }
+      }
+
+      const streamedText = textFromJsonEvent(line);
+      if (streamedText) {
+        streamedAssistantParts.push(streamedText);
+        enqueueText(streamedText);
+      }
+
+      // Some provider/transport paths persist message_end without emitting a
+      // usable text_end delta. Deliver the finalized assistant text as a
+      // fallback, while avoiding duplication when text_end was observed.
+      if (event.type === "message_end" && event.message?.role === "assistant") {
+        const finalText = textFromPiContent(event.message.content).trim();
+        const streamedTextCombined = streamedAssistantParts.join("\n\n").trim();
+        if (finalText && finalText !== streamedTextCombined) enqueueText(finalText);
+        if (event.message.stopReason === "stop") scheduleTerminalSettle();
+      }
+
+      // agent_end is only a low-level boundary and may still be followed by
+      // queued steering/follow-up work. agent_settled is the true completion.
+      if (event.type === "agent_settled") {
         void finish({
           ok: true,
           code: 0,
@@ -261,9 +323,25 @@ async function startRpcProcess(args, { cwd, idleTimeoutMs, hardTimeoutMs, env = 
       await client.abort();
     },
     steer: async (envelope) => {
-      await client.steer(steerMessage(envelope));
+      pendingSteers += 1;
+      clearTimeout(terminalSettleTimer);
+      try {
+        await client.steer(steerMessage(envelope));
+      } catch (error) {
+        pendingSteers = Math.max(0, pendingSteers - 1);
+        throw error;
+      }
     },
   };
+}
+
+function textFromPiContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part) => part?.type === "text")
+    .map((part) => String(part.text || ""))
+    .join("\n\n");
 }
 
 function textFromJsonEvent(line) {
