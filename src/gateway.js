@@ -1098,7 +1098,7 @@ function assistantDisplayItemFromEvent(event) {
   }
   if (/reasoning|thinking/i.test(messageEvent.type)) {
     const text = firstTextValue(messageEvent, ["content", "text", "thinking", "reasoning"]);
-    return text ? { type: "assistant/reasoning", text: `[reasoning]\n${text}` } : null;
+    return text ? { type: "assistant/reasoning", text: `_${text}_` } : null;
   }
   if (/tool/i.test(messageEvent.type)) {
     const text = compactJson(messageEvent);
