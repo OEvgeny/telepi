@@ -117,7 +117,7 @@ npm run gateway
 
 While a routed pi session is running, the gateway sends Telegram `typing` chat actions scoped to the topic. It does not rename topics for transient status; topic edits are reserved for real metadata changes.
 
-Agent runs use an idle timeout, not a fixed wall-clock timeout: by default a run is stopped only after 15 minutes without pi events. Set `idle_timeout_ms` on an agent to tune that value, or set `hard_timeout_ms` to add an absolute maximum runtime.
+Agent runs have no destructive timeout by default. A model request or long-running tool can legitimately remain silent, so absence of pi events is not treated as failure; the topic stays busy until the run finishes or the user cancels it. Operators can explicitly set `idle_timeout_ms` for legacy idle-stop behavior or `hard_timeout_ms` for an absolute maximum runtime.
 
 By default, Telegram receives only assistant text messages. To expose more pi stream message kinds, add an explicit allowlist under `telegram`, an `agent`, or a specific `topic`; topic settings override agent settings, and agent settings override global Telegram settings:
 

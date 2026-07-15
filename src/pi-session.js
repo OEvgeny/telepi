@@ -75,8 +75,12 @@ export function buildPiRunSpec(config, topic, envelope, options = {}) {
       TELEPI_BUTTON_STORE: resolvePath(config.project.cache_dir, "button-callbacks.jsonl"),
     },
     initialMessage: formatTelegramMessage(topic, withAliasName(config, envelope)),
-    idleTimeoutMs: Number(agent.idle_timeout_ms || agent.timeout_ms || 15 * 60 * 1000),
-    hardTimeoutMs: Number(agent.hard_timeout_ms || 0),
+    // Silence is not proof of a stalled run: a tool or provider request can work
+    // for a long time without emitting pi events. Never apply a destructive idle
+    // timeout by default; cancellation stays user-driven. Operators may still
+    // opt into the legacy idle timeout or an explicit absolute hard limit.
+    idleTimeoutMs: Number(agent.idle_timeout_ms ?? agent.timeout_ms ?? 0),
+    hardTimeoutMs: Number(agent.hard_timeout_ms ?? 0),
     sessionId: String(sessionId),
     agent,
   };
