@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getAgent, resolveEntityDir, resolvePath, resolveTopicModel } from "./config.js";
@@ -122,15 +122,11 @@ export function parseCompactCommand(text) {
 // recent tokens survive compaction uncompacted) is layered on top when given.
 function buildSettingsManager(SettingsManager, entityDir, keepRecentTokens) {
   if (!keepRecentTokens) return undefined;
-  let entitySettings = {};
-  const settingsPath = join(entityDir, ".pi", "settings.json");
-  if (existsSync(settingsPath)) {
-    entitySettings = JSON.parse(readFileSync(settingsPath, "utf8"));
-  }
-  return SettingsManager.inMemory({
-    ...entitySettings,
-    compaction: { ...entitySettings.compaction, keepRecentTokens: Number(keepRecentTokens) },
+  const settingsManager = SettingsManager.create(entityDir);
+  settingsManager.applyOverrides({
+    compaction: { keepRecentTokens: Number(keepRecentTokens) },
   });
+  return settingsManager;
 }
 
 // Match pi's own --model parser, including optional :thinking suffixes such
