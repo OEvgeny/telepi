@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { getAgent, resolveEntityDir, resolveTopicModel } from "./config.js";
+import { getAgent, resolveEntityDir, resolvePath, resolveTopicModel } from "./config.js";
 
 let piModulePromise;
 
@@ -37,18 +37,49 @@ export async function compactPiSession(config, topic, instructions, options = {}
     throw new Error(`No session file found for ${topic.name} (${sessionId})`);
   }
 
-  const { createAgentSession, SessionManager, SettingsManager } = await loadPiModule();
-  const sessionManager = SessionManager.open(sessionFile, config.project.sessions_dir, entityDir);
+  const pi = await loadPiModule();
+  const sessionManager = pi.SessionManager.open(sessionFile, config.project.sessions_dir, entityDir);
   const modelSpec = options.model || resolveTopicModel(config, topic, agent);
-  const resolvedModel = modelSpec ? await resolveCompactionModel(modelSpec) : {};
-  const { session } = await createAgentSession({
-    cwd: entityDir,
-    sessionManager,
-    model: resolvedModel.model,
-    modelRuntime: resolvedModel.modelRuntime,
-    thinkingLevel: resolvedModel.thinkingLevel,
-    settingsManager: buildSettingsManager(SettingsManager, entityDir, options.keepRecentTokens),
-  });
+  const settingsManager = buildSettingsManager(pi.SettingsManager, entityDir, options.keepRecentTokens);
+  const configuredExtensions = [...new Set([
+    ...(config.project.extensions || []),
+    ...(agent.extensions || []),
+  ].map((extension) => resolvePath(config.project.root, extension)))];
+  const configuredSkills = (agent.skills || []).map((skill) => resolvePath(config.project.root, skill));
+
+  let session;
+  if (typeof pi.createAgentSessionServices === "function" && typeof pi.createAgentSessionFromServices === "function") {
+    // Load the same global packages and configured extensions as a normal pi run
+    // before resolving the model. Provider extensions register their models while
+    // services are created, so the resolver and session share one ModelRuntime.
+    const services = await pi.createAgentSessionServices({
+      cwd: entityDir,
+      settingsManager,
+      resourceLoaderOptions: {
+        additionalExtensionPaths: configuredExtensions,
+        additionalSkillPaths: configuredSkills,
+      },
+    });
+    const resolvedModel = modelSpec
+      ? await resolveCompactionModel(modelSpec, { modelRuntime: services.modelRuntime })
+      : {};
+    ({ session } = await pi.createAgentSessionFromServices({
+      services,
+      sessionManager,
+      model: resolvedModel.model,
+      thinkingLevel: resolvedModel.thinkingLevel,
+    }));
+  } else {
+    const resolvedModel = modelSpec ? await resolveCompactionModel(modelSpec) : {};
+    ({ session } = await pi.createAgentSession({
+      cwd: entityDir,
+      sessionManager,
+      model: resolvedModel.model,
+      modelRuntime: resolvedModel.modelRuntime,
+      thinkingLevel: resolvedModel.thinkingLevel,
+      settingsManager,
+    }));
+  }
   const combinedInstructions = instructions
     ? `${instructions}\n\n${FRESHNESS_INSTRUCTIONS}`
     : FRESHNESS_INSTRUCTIONS;
@@ -105,13 +136,13 @@ function buildSettingsManager(SettingsManager, entityDir, keepRecentTokens) {
 // Match pi's own --model parser, including optional :thinking suffixes such
 // as openai-codex/gpt-5.6-sol:high. Keeping this at the fresh compaction
 // worker boundary also means model aliases/catalog updates match normal runs.
-export async function resolveCompactionModel(spec) {
+export async function resolveCompactionModel(spec, options = {}) {
   const pi = await loadPiModule();
   let resolved;
-  let modelRuntime;
+  let modelRuntime = options.modelRuntime;
 
-  if (typeof pi.ModelRuntime?.create === "function") {
-    modelRuntime = await pi.ModelRuntime.create();
+  if (modelRuntime || typeof pi.ModelRuntime?.create === "function") {
+    modelRuntime ||= await pi.ModelRuntime.create();
     resolved = pi.resolveCliModel({ cliModel: String(spec), modelRuntime });
   } else if (typeof pi.ModelRegistry?.create === "function" && typeof pi.AuthStorage?.create === "function") {
     // Compatibility with pi versions before ModelRuntime became the public SDK API.
