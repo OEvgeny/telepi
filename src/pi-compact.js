@@ -45,6 +45,7 @@ export async function compactPiSession(config, topic, instructions, options = {}
     cwd: entityDir,
     sessionManager,
     model: resolvedModel.model,
+    modelRuntime: resolvedModel.modelRuntime,
     thinkingLevel: resolvedModel.thinkingLevel,
     settingsManager: buildSettingsManager(SettingsManager, entityDir, options.keepRecentTokens),
   });
@@ -105,13 +106,26 @@ function buildSettingsManager(SettingsManager, entityDir, keepRecentTokens) {
 // as openai-codex/gpt-5.6-sol:high. Keeping this at the fresh compaction
 // worker boundary also means model aliases/catalog updates match normal runs.
 export async function resolveCompactionModel(spec) {
-  const { AuthStorage, ModelRegistry, resolveCliModel } = await loadPiModule();
-  const modelRegistry = ModelRegistry.create(AuthStorage.create());
-  const resolved = resolveCliModel({ cliModel: String(spec), modelRegistry });
+  const pi = await loadPiModule();
+  let resolved;
+  let modelRuntime;
+
+  if (typeof pi.ModelRuntime?.create === "function") {
+    modelRuntime = await pi.ModelRuntime.create();
+    resolved = pi.resolveCliModel({ cliModel: String(spec), modelRuntime });
+  } else if (typeof pi.ModelRegistry?.create === "function" && typeof pi.AuthStorage?.create === "function") {
+    // Compatibility with pi versions before ModelRuntime became the public SDK API.
+    const modelRegistry = pi.ModelRegistry.create(pi.AuthStorage.create());
+    resolved = pi.resolveCliModel({ cliModel: String(spec), modelRegistry });
+  } else {
+    throw new Error("Installed pi SDK does not expose a supported model resolver");
+  }
+
   if (resolved.error) throw new Error(resolved.error);
   if (!resolved.model) throw new Error(`Unknown model: ${spec}`);
   return {
     model: resolved.model,
+    modelRuntime,
     thinkingLevel: resolved.thinkingLevel,
     warning: resolved.warning,
   };
