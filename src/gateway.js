@@ -694,16 +694,27 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
   // A turn that delivered its output through a tool (photo, buttons, …) is
   // not "without output" — suppress the placeholder for those.
   if (result.ok && (result.streamedTextCount > 0 || active.displayedMessageCount > 0 || active.telegramDeliveryCount > 0)) return;
-  const output = result.stdout || result.stderr;
-  const text = result.ok
-    ? (output || `${topic.agent} completed without output.`)
-    : `pi session failed (${result.code})\n\n${output || "No output"}`;
+  if (!result.ok) {
+    const output = result.stderr || result.stdout;
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
+      text: `pi session failed (${result.code})\n\n${output || "No output"}`,
+      quote: true,
+    });
+    return;
+  }
+
+  // stderr is process diagnostics, never successful assistant output. Provider
+  // warnings belong in gateway logs even when the model emits no final text.
+  const output = result.stdout;
   await sendLongMessage(telegram, {
     chatId: envelope.chatId,
     topicId: envelope.topicId,
     replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
-    text,
-    quote: !result.ok || !output,
+    text: output || `${topic.agent} completed without output.`,
+    quote: !output,
   });
 }
 
