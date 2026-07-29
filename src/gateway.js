@@ -5,7 +5,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeF
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { readConfig, getBotToken, findTopic, findTopicByName } from "./config.js";
-import { TelegramClient, hydrateEnvelopeMedia, updateToEnvelope } from "./telegram.js";
+import { TelegramClient, attributeBotReplyToAgent, hydrateEnvelopeMedia, updateToEnvelope } from "./telegram.js";
 import { parseCompactCommand } from "./pi-compact.js";
 import { normalizePromptInboxInterval, startPromptInboxPolling } from "./prompt-inbox.js";
 import { startPiForTopic } from "./pi-session.js";
@@ -99,6 +99,11 @@ async function main() {
         console.error(`ignored unknown topic chat=${envelope.chatId} topic=${envelope.topicId}`);
         continue;
       }
+      envelope = attributeBotReplyToAgent(envelope, {
+        botUserId: me.id,
+        agentId: topic.agent,
+        agentName: config.agents?.[topic.agent]?.name || topic.name,
+      });
       const configForMessage = config;
       const key = `${envelope.chatId}:${envelope.topicId}`;
       const active = inFlight.get(key);
@@ -837,7 +842,11 @@ async function handleButtonCallback(config, telegram, inFlight, query, buttonRef
     });
   }
 
-  const envelope = envelopeFromButtonCallback(query, callback);
+  const envelope = attributeBotReplyToAgent(envelopeFromButtonCallback(query, callback), {
+    botUserId: query.message?.from?.id,
+    agentId: topic.agent,
+    agentName: config.agents?.[topic.agent]?.name || topic.name,
+  });
   const key = `${envelope.chatId}:${envelope.topicId}`;
   const active = inFlight.get(key);
   if (active) {
@@ -955,7 +964,9 @@ function envelopeFromButtonCallback(query, callback) {
     replyTo: callback.message_id ? {
       messageId: callback.message_id,
       text: query.message?.text || query.message?.caption || "",
+      userId: query.message?.from?.id == null ? undefined : String(query.message.from.id),
       userName: query.message?.from?.first_name || query.message?.from?.username || "",
+      isBot: query.message?.from?.is_bot === true,
     } : undefined,
   };
 }

@@ -133,6 +133,7 @@ function formatLocalTime(d) {
 function formatReplyContext(replyTo) {
   return [
     `reply_to_message_id=${replyTo.messageId || "unknown"}`,
+    replyTo.agentId ? `reply_to_agent_id=${replyTo.agentId}` : undefined,
     replyTo.userName ? `reply_to_user_name=${replyTo.userName}` : undefined,
     replyTo.text ? `reply_to_text=${replyTo.text}` : undefined,
     replyTo.hasPhoto ? "reply_to_has_photo=true" : undefined,

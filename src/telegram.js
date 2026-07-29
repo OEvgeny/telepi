@@ -266,6 +266,26 @@ export function updateToEnvelope(update) {
   };
 }
 
+// Telegram identifies every gateway-authored message as the shared bot. Once
+// routing has identified the topic, replace that transport identity with the
+// logical agent speaking in the topic so models do not mistake replies for a
+// conversation with the gateway bot itself.
+export function attributeBotReplyToAgent(envelope, { botUserId, agentId, agentName } = {}) {
+  const replyTo = envelope?.replyTo;
+  if (!replyTo?.isBot) return envelope;
+  if (botUserId != null && replyTo.userId != null && String(replyTo.userId) !== String(botUserId)) return envelope;
+  const logicalName = String(agentName || agentId || "").trim();
+  if (!logicalName) return envelope;
+  return {
+    ...envelope,
+    replyTo: {
+      ...replyTo,
+      userName: logicalName,
+      agentId: agentId == null ? undefined : String(agentId),
+    },
+  };
+}
+
 function messageToReplyContext(message) {
   const attachments = getMessageAttachments(message);
   return {
@@ -274,6 +294,7 @@ function messageToReplyContext(message) {
     messageId: message.message_id == null ? undefined : String(message.message_id),
     userId: message.from?.id == null ? undefined : String(message.from.id),
     userName: message.from?.username || message.from?.first_name || undefined,
+    isBot: message.from?.is_bot === true,
     text: message.text || message.caption || "",
     hasPhoto: Array.isArray(message.photo) && message.photo.length > 0,
     documentFileName: message.document?.file_name,
