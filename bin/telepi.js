@@ -564,8 +564,27 @@ program
   });
 
 program
+  .command("session:limit")
+  .description("Configure the active session size limit checked after successful compaction")
+  .option("--size <bytes>", "Checkpoint and relink compacted sessions at this size (for example 32MiB)")
+  .option("--unlimited", "Remove the configured session size limit")
+  .action((options) => {
+    const config = load();
+    if (options.size && options.unlimited) throwCli("use either --size or --unlimited, not both");
+    if (options.size) {
+      config.sessions.max_bytes = parseByteSize(options.size);
+      save(config);
+    } else if (options.unlimited) {
+      delete config.sessions.max_bytes;
+      save(config);
+    }
+    const maxBytes = config.sessions.max_bytes;
+    console.log(maxBytes == null ? "unlimited" : `${maxBytes}\t${formatByteSize(maxBytes)}`);
+  });
+
+program
   .command("session:compact")
-  .description("Compact a topic's pi session transcript in place")
+  .description("Compact a topic session and checkpoint it when the configured size limit is reached")
   .requiredOption("--topic <name>", "Existing topic mapping name")
   .option("--instructions <text>", "Custom compaction instructions")
   .option("--model <provider/model[:thinking]>", "Model/effort for compaction; defaults to the topic's configured model")
@@ -599,18 +618,46 @@ program
       }
       throw error;
     }
+    const sourceSessionId = topic.session_id;
+    if (result?.checkpoint) {
+      if (String(result.checkpoint.sourceSessionId) !== String(sourceSessionId)) {
+        throw new Error(`checkpoint source session mismatch: ${result.checkpoint.sourceSessionId} != ${sourceSessionId}`);
+      }
+      config.sessions.unlinked.push({
+        topic_name: topic.name,
+        chat_id: String(topic.chat_id),
+        topic_id: String(topic.topic_id),
+        agent: topic.agent,
+        session_id: String(sourceSessionId),
+        replaced_by_session_id: String(result.checkpoint.sessionId),
+        unlinked_at: new Date().toISOString(),
+        reason: `compaction checkpoint at ${result.checkpoint.sourceBytes} bytes`,
+      });
+      topic.session_id = String(result.checkpoint.sessionId);
+      save(config);
+    }
     if (options.json) {
       console.log(JSON.stringify({
         status: "compacted",
         topic: topic.name,
         sessionId: topic.session_id,
+        sourceSessionId,
         result: {
           firstKeptEntryId: result?.firstKeptEntryId,
           tokensBefore: result?.tokensBefore,
         },
+        checkpoint: result?.checkpoint ? {
+          sessionId: result.checkpoint.sessionId,
+          sourceBytes: result.checkpoint.sourceBytes,
+          checkpointBytes: result.checkpoint.checkpointBytes,
+          copiedEntries: result.checkpoint.copiedEntries,
+        } : null,
       }));
     } else {
-      console.log(`compacted ${topic.name} (${topic.session_id}): tokensBefore=${result?.tokensBefore ?? "?"}`);
+      const checkpoint = result?.checkpoint
+        ? `; checkpointed ${sourceSessionId} -> ${result.checkpoint.sessionId} (${formatByteSize(result.checkpoint.sourceBytes)} -> ${formatByteSize(result.checkpoint.checkpointBytes)})`
+        : "";
+      console.log(`compacted ${topic.name} (${topic.session_id}): tokensBefore=${result?.tokensBefore ?? "?"}${checkpoint}`);
     }
   });
 
@@ -750,6 +797,9 @@ function validateConfig(config) {
     const path = join(config.project.root, extension);
     if (!existsSync(path)) errors.push(`project extension missing: ${relative(config.project.root, path)}`);
   }
+  if (config.sessions.max_bytes != null && (!Number.isSafeInteger(config.sessions.max_bytes) || config.sessions.max_bytes <= 0)) {
+    errors.push("sessions.max_bytes must be a positive integer number of bytes");
+  }
   for (const topic of config.topics) {
     const key = `${topic.chat_id}:${topic.topic_id}`;
     if (seen.has(key)) errors.push(`duplicate topic mapping: ${key}`);
@@ -802,6 +852,30 @@ function defaultSessionId(agentId, agent, topicName, topicId) {
 
 function freshSessionId(topic) {
   return `${topic.agent}-${topic.topic_id}-${compactTimestamp()}`;
+}
+
+function parseByteSize(value) {
+  const match = String(value).trim().match(/^(\d+(?:\.\d+)?)\s*(B|KB|KIB|MB|MIB|GB|GIB)?$/i);
+  if (!match) throwCli(`invalid size: ${value}`);
+  const units = {
+    B: 1,
+    KB: 1000,
+    KIB: 1024,
+    MB: 1000 ** 2,
+    MIB: 1024 ** 2,
+    GB: 1000 ** 3,
+    GIB: 1024 ** 3,
+  };
+  const bytes = Number(match[1]) * units[(match[2] || "B").toUpperCase()];
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) throwCli(`size must resolve to a positive whole number of bytes: ${value}`);
+  return bytes;
+}
+
+function formatByteSize(bytes) {
+  if (bytes >= 1024 ** 3 && bytes % (1024 ** 3) === 0) return `${bytes / (1024 ** 3)}GiB`;
+  if (bytes >= 1024 ** 2 && bytes % (1024 ** 2) === 0) return `${bytes / (1024 ** 2)}MiB`;
+  if (bytes >= 1024 && bytes % 1024 === 0) return `${bytes / 1024}KiB`;
+  return `${bytes}B`;
 }
 
 function compactTimestamp(date = new Date()) {

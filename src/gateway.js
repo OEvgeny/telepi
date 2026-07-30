@@ -1419,12 +1419,16 @@ async function handleCompactCommand(config, telegram, topic, envelope, instructi
       });
       return;
     }
-    console.error(`compacted chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} duration=${durationSeconds}s`);
+    if (outcome.checkpoint?.sessionId) topic.session_id = outcome.checkpoint.sessionId;
+    console.error(`compacted chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} duration=${durationSeconds}s checkpoint=${outcome.checkpoint?.sessionId || "none"}`);
+    const checkpointText = outcome.checkpoint
+      ? `\nCheckpoint session: ${outcome.checkpoint.sessionId}\nTranscript bytes: ${outcome.checkpoint.sourceBytes} → ${outcome.checkpoint.checkpointBytes}`
+      : "";
     await sendLongMessage(telegram, {
       chatId: envelope.chatId,
       topicId: envelope.topicId,
       replyToMessageId: envelope.messageId,
-      text: `Compacted ${topic.name}.\n\nKept from entry: ${outcome.result.firstKeptEntryId}\nTokens before: ${outcome.result.tokensBefore}`,
+      text: `Compacted ${topic.name}.\n\nKept from entry: ${outcome.result.firstKeptEntryId}\nTokens before: ${outcome.result.tokensBefore}${checkpointText}`,
       quote: true,
     });
   } catch (error) {

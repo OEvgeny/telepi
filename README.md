@@ -75,11 +75,21 @@ npm run telepi -- session:restore --name Helper --session-id helper-1001
 
 `session:unlink` changes only the topic mapping's active `session_id`; the old `.telepi/pi-sessions/*.jsonl` files are preserved and recorded under `sessions.unlinked` in `config/telepi.yaml`.
 
-Compact a long-running session in place:
+Compact a long-running session:
 
 ```bash
 npm run telepi -- session:compact --topic Helper [--instructions "..."] [--model <provider/model>]
 ```
+
+By default there is no active-session size limit. Configure one through the CLI:
+
+```bash
+npm run telepi -- session:limit --size 32MiB
+npm run telepi -- session:limit                 # show the current limit
+npm run telepi -- session:limit --unlimited
+```
+
+After a successful compaction, a transcript at or above the configured limit is checkpointed into a fresh session containing only pi's retained tail, the successful compaction entry, and subsequent context entries. The topic is relinked only after the checkpoint produces the same model-facing message context. The original transcript remains unchanged in session history and the new header records it as `parentSession`.
 
 Send a direct Telegram message to a topic without invoking pi or the gateway:
 

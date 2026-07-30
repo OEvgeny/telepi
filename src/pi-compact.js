@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { getAgent, resolveEntityDir, resolvePath, resolveTopicModel } from "./config.js";
 
 let piModulePromise;
@@ -89,10 +91,141 @@ export async function compactPiSession(config, topic, instructions, options = {}
       { type: "text", text: COMPACTION_NOTICE },
     ], false);
     sessionManager.flush?.();
-    return result;
+
+    const maxBytes = config.sessions?.max_bytes;
+    if (maxBytes != null && (!Number.isSafeInteger(maxBytes) || maxBytes <= 0)) {
+      throw new Error(`Invalid sessions.max_bytes: ${String(maxBytes)}`);
+    }
+    const checkpoint = maxBytes != null && statSync(sessionFile).size >= maxBytes
+      ? createCompactionCheckpoint(pi.SessionManager, {
+          sessionManager,
+          sourceFile: sessionFile,
+          sessionsDir: config.project.sessions_dir,
+          entityDir,
+          sessionId: freshCheckpointSessionId(topic),
+        })
+      : null;
+    return { ...result, checkpoint };
   } finally {
     session.dispose?.();
   }
+}
+
+// Materialize pi's effective post-compaction context in a fresh session file.
+// The source transcript stays append-only history; the checkpoint contains only
+// the retained tail beginning at firstKeptEntryId, the successful compaction,
+// and entries appended after it (currently the freshness notice above).
+export function createCompactionCheckpoint(SessionManager, options) {
+  const {
+    sessionManager,
+    sourceFile,
+    sessionsDir,
+    entityDir,
+    sessionId,
+    now = new Date(),
+  } = options;
+  const branch = sessionManager.getBranch();
+  let compactionIndex = -1;
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    if (branch[index].type === "compaction") {
+      compactionIndex = index;
+      break;
+    }
+  }
+  if (compactionIndex < 0) throw new Error("Cannot checkpoint a session without a successful compaction");
+
+  const compaction = branch[compactionIndex];
+  const firstKeptIndex = branch.findIndex((entry) => entry.id === compaction.firstKeptEntryId);
+  if (firstKeptIndex < 0 || firstKeptIndex >= compactionIndex) {
+    throw new Error(`Compaction firstKeptEntryId is not on the retained branch: ${compaction.firstKeptEntryId}`);
+  }
+
+  const copiedEntries = branch.slice(firstKeptIndex).map((entry, index) => (
+    index === 0 ? { ...entry, parentId: null } : { ...entry }
+  ));
+  const sourceContext = sessionManager.buildSessionContext();
+  const sourceHeader = sessionManager.getHeader();
+  const timestamp = now.toISOString();
+  const usedIds = new Set(copiedEntries.map((entry) => entry.id));
+  const contextSettingEntries = [];
+  let settingParentId = copiedEntries.at(-1)?.id || null;
+  if (sourceContext.model) {
+    const id = freshEntryId(usedIds);
+    contextSettingEntries.push({
+      type: "model_change",
+      id,
+      parentId: settingParentId,
+      timestamp,
+      provider: sourceContext.model.provider,
+      modelId: sourceContext.model.modelId,
+    });
+    settingParentId = id;
+  }
+  if (sourceContext.thinkingLevel) {
+    const id = freshEntryId(usedIds);
+    contextSettingEntries.push({
+      type: "thinking_level_change",
+      id,
+      parentId: settingParentId,
+      timestamp,
+      thinkingLevel: sourceContext.thinkingLevel,
+    });
+  }
+  const persistedEntries = [...copiedEntries, ...contextSettingEntries];
+  const header = {
+    type: "session",
+    version: sourceHeader.version || 3,
+    id: sessionId,
+    timestamp,
+    cwd: sourceHeader.cwd || entityDir,
+    parentSession: sourceFile,
+  };
+  const fileTimestamp = timestamp.replace(/[:.]/g, "-");
+  const targetFile = join(sessionsDir, `${fileTimestamp}_${sessionId}.jsonl`);
+  const tempFile = `${targetFile}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
+  const body = `${[header, ...persistedEntries].map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+
+  try {
+    writeFileSync(tempFile, body, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    const checkpointManager = SessionManager.open(tempFile, sessionsDir, entityDir);
+    const checkpointContext = checkpointManager.buildSessionContext();
+    if (!isDeepStrictEqual(checkpointContext, sourceContext)) {
+      throw new Error("Checkpoint model context differs from the compacted source session");
+    }
+    if (checkpointManager.getSessionId() !== sessionId) {
+      throw new Error(`Checkpoint session id mismatch: ${checkpointManager.getSessionId()} != ${sessionId}`);
+    }
+    renameSync(tempFile, targetFile);
+  } finally {
+    if (existsSync(tempFile)) unlinkSync(tempFile);
+  }
+
+  return {
+    sessionId,
+    file: targetFile,
+    sourceSessionId: sessionManager.getSessionId(),
+    sourceBytes: statSync(sourceFile).size,
+    checkpointBytes: statSync(targetFile).size,
+    firstKeptEntryId: compaction.firstKeptEntryId,
+    compactionEntryId: compaction.id,
+    copiedEntries: copiedEntries.length,
+  };
+}
+
+function freshCheckpointSessionId(topic, date = new Date()) {
+  const timestamp = date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  return `${topic.agent}-${topic.topic_id}-${timestamp}-${randomBytes(3).toString("hex")}`;
+}
+
+function freshEntryId(usedIds) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const id = randomBytes(4).toString("hex");
+    if (!usedIds.has(id)) {
+      usedIds.add(id);
+      return id;
+    }
+  }
+  throw new Error("Could not generate a unique checkpoint entry id");
 }
 
 // Record a message the machinery posted to Telegram in the topic's session

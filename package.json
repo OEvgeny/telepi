@@ -8,6 +8,7 @@
   },
   "scripts": {
     "check": "node --check bin/telepi.js && node --check src/gateway.js && node --check src/config.js && node --check src/telegram.js && node --check src/pi-session.js && node --check src/pi-compact.js && node --check src/logging.js && node --check src/prompt-inbox.js && node --check extensions/telepi-telegram.ts",
+    "test": "node --test test/*.test.js",
     "gateway": "node src/gateway.js",
     "telepi": "node bin/telepi.js"
   },

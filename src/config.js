@@ -133,9 +133,11 @@ function normalizeUsers(users) {
 }
 
 function normalizeSessions(sessions) {
-  return {
+  const normalized = {
     unlinked: Array.isArray(sessions.unlinked) ? sessions.unlinked : [],
   };
+  if (sessions.max_bytes != null) normalized.max_bytes = Number(sessions.max_bytes);
+  return normalized;
 }
 
 function normalizeOptionalStringList(values) {
