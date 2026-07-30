@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { createCompactionCheckpoint } from "../src/pi-compact.js";
+import { createCompactionCheckpoint, hasMeaningfulEntriesAfterLatestCompaction } from "../src/pi-compact.js";
 
 const piBin = realpathSync(execFileSync("bash", ["-lc", "command -v pi"], { encoding: "utf8" }).trim());
 const pi = await import(pathToFileURL(resolve(dirname(piBin), "index.js")).href);
@@ -22,6 +22,15 @@ const usage = {
 function assistant(content, stopReason = "stop", timestamp = Date.now()) {
   return { role: "assistant", content, api: "test", provider: "test", model: "test", usage, stopReason, timestamp };
 }
+
+test("a compaction freshness notice does not make the session compactable again", () => {
+  const compaction = { type: "compaction", id: "compact", parentId: "answer" };
+  const notice = { type: "custom_message", id: "notice", parentId: "compact", customType: "telepi-compaction-notice" };
+  const model = { type: "model_change", id: "model", parentId: "notice" };
+  assert.equal(hasMeaningfulEntriesAfterLatestCompaction([compaction, notice, model]), false);
+  assert.equal(hasMeaningfulEntriesAfterLatestCompaction([compaction, notice, { type: "message", id: "next" }]), true);
+  assert.equal(hasMeaningfulEntriesAfterLatestCompaction([{ type: "message", id: "first" }]), true);
+});
 
 test("compaction checkpoint keeps the exact model context without summarized history", () => {
   const sessionDir = mkdtempSync(join(tmpdir(), "telepi-checkpoint-test-"));

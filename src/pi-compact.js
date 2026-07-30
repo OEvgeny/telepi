@@ -41,6 +41,9 @@ export async function compactPiSession(config, topic, instructions, options = {}
 
   const pi = await loadPiModule();
   const sessionManager = pi.SessionManager.open(sessionFile, config.project.sessions_dir, entityDir);
+  if (!hasMeaningfulEntriesAfterLatestCompaction(sessionManager.getBranch())) {
+    throw new Error("Already compacted");
+  }
   const modelSpec = options.model || resolveTopicModel(config, topic, agent);
   const settingsManager = buildSettingsManager(pi.SettingsManager, entityDir, options.keepRecentTokens);
   const configuredExtensions = [...new Set([
@@ -109,6 +112,21 @@ export async function compactPiSession(config, topic, instructions, options = {}
   } finally {
     session.dispose?.();
   }
+}
+
+export function hasMeaningfulEntriesAfterLatestCompaction(branch) {
+  let compactionIndex = -1;
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    if (branch[index].type === "compaction") {
+      compactionIndex = index;
+      break;
+    }
+  }
+  if (compactionIndex < 0) return true;
+  return branch.slice(compactionIndex + 1).some((entry) => {
+    if (entry.type === "custom_message" && entry.customType === "telepi-compaction-notice") return false;
+    return !["model_change", "thinking_level_change", "session_info", "label"].includes(entry.type);
+  });
 }
 
 // Materialize pi's effective post-compaction context in a fresh session file.
