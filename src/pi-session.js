@@ -1,8 +1,8 @@
-import { execFileSync } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { closeSync, mkdirSync, openSync, readSync, readdirSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getAgent, getBotToken, resolveEntityDir, resolvePath, resolveTopicModel } from "./config.js";
+import { prependExecutableDirToPath, resolvePiCliPath, resolvePiPackageIndex } from "./pi-path.js";
 
 export async function runPiForTopic(config, topic, envelope, options = {}) {
   const run = await startPiForTopic(config, topic, envelope, options);
@@ -177,7 +177,12 @@ async function startRpcProcess(args, {
   const client = new RpcClient({
     cliPath: resolvePiCliPath(),
     cwd: resolve(cwd),
-    env,
+    // RpcClient launches the CLI with the bare command "node". Keep that
+    // spawn working even when the gateway starts before a login PATH exists.
+    env: {
+      ...env,
+      PATH: prependExecutableDirToPath(process.execPath, env.PATH ?? process.env.PATH),
+    },
     args,
   });
   await client.start();
@@ -479,13 +484,4 @@ let piModulePromise;
 async function loadPiModule() {
   piModulePromise ||= import(pathToFileURL(resolvePiPackageIndex()).href);
   return piModulePromise;
-}
-
-function resolvePiPackageIndex() {
-  return resolve(dirname(resolvePiCliPath()), "index.js");
-}
-
-function resolvePiCliPath() {
-  const piBin = execFileSync("bash", ["-lc", "command -v pi"], { encoding: "utf8" }).trim();
-  return realpathSync(piBin);
 }

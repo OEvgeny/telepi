@@ -1,10 +1,10 @@
-import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { getAgent, resolveEntityDir, resolvePath, resolveTopicModel } from "./config.js";
+import { resolvePiPackageIndex } from "./pi-path.js";
 
 let piModulePromise;
 
@@ -322,10 +322,4 @@ function findSessionFile(sessionDir, sessionId) {
 async function loadPiModule() {
   piModulePromise ||= import(pathToFileURL(resolvePiPackageIndex()).href);
   return piModulePromise;
-}
-
-function resolvePiPackageIndex() {
-  const piBin = execFileSync("bash", ["-lc", "command -v pi"], { encoding: "utf8" }).trim();
-  const cliPath = realpathSync(piBin);
-  return resolve(dirname(cliPath), "index.js");
 }

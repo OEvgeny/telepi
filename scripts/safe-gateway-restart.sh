@@ -130,10 +130,19 @@ if [[ -n "$MODEL" ]]; then
   PI_ARGS+=(--model "$MODEL")
 fi
 
+PI_BIN="${TELEPI_PI_BIN:-}"
+if [[ -z "$PI_BIN" ]]; then
+  PI_BIN="$(command -v pi || true)"
+fi
+if [[ -z "$PI_BIN" || ! -x "$PI_BIN" ]]; then
+  report_failure "⚠️ Safe gateway restart worker could not find the pi CLI. Set TELEPI_PI_BIN to its absolute path."
+  exit 1
+fi
+
 set +e
 (
   cd "$ENTITY_DIR"
-  pi "${PI_ARGS[@]}" "$PROMPT"
+  "$PI_BIN" "${PI_ARGS[@]}" "$PROMPT"
 ) >"$ROOT/$LOG" 2>&1
 code=$?
 set -e

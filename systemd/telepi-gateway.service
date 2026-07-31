@@ -1,5 +1,5 @@
 [Unit]
-Description=Telepi Telegram topic gateway
+Description=telepi gateway (Telegram to pi agent router)
 After=network-online.target
 Wants=network-online.target
 
@@ -7,13 +7,16 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/telepi
 Environment=TELEPI_CONFIG=%h/telepi/config/telepi.yaml
+Environment=TELEPI_PI_BIN=%h/.npm/bin/pi
+Environment=PATH=%h/.npm/bin:%h/.nix-profile/bin:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TELEPI_PROMPT_INBOX_DIR=%h/telepi/.telepi/prompt-inbox
+Environment=TELEPI_PROMPT_INBOX_INTERVAL_MS=1000
 EnvironmentFile=-%h/telepi/.env
-ExecStart=/usr/bin/env npm run gateway
-Restart=on-failure
+ExecStart=%h/.nix-profile/bin/node src/gateway.js
+Restart=always
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=telepi-gateway
+StandardOutput=append:%h/telepi/.telepi/gateway.log
+StandardError=append:%h/telepi/.telepi/gateway.log
 
 [Install]
 WantedBy=default.target

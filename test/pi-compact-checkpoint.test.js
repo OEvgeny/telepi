@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { createCompactionCheckpoint, hasMeaningfulEntriesAfterLatestCompaction } from "../src/pi-compact.js";
+import { resolvePiPackageIndex } from "../src/pi-path.js";
 
-const piBin = realpathSync(execFileSync("bash", ["-lc", "command -v pi"], { encoding: "utf8" }).trim());
-const pi = await import(pathToFileURL(resolve(dirname(piBin), "index.js")).href);
+const pi = await import(pathToFileURL(resolvePiPackageIndex()).href);
 
 const usage = {
   input: 1,

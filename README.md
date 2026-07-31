@@ -177,7 +177,7 @@ Button state lives in `.telepi/cache/button-callbacks.jsonl`, one record per sen
 
 ## Running as a service
 
-Install as a systemd user service after adjusting paths in `systemd/telepi-gateway.service` if this repo is not at `~/telepi`:
+Install as a systemd user service after adjusting paths in `systemd/telepi-gateway.service` if this repo is not at `~/telepi`, Node is not in `~/.nix-profile/bin`, or pi is not in `~/.npm/bin`. The unit sets an explicit runtime `PATH` and `TELEPI_PI_BIN` so it does not depend on a login shell or a desktop session importing environment variables after boot:
 
 ```bash
 mkdir -p ~/.config/systemd/user
