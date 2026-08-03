@@ -190,7 +190,7 @@ async function startRpcProcess(args, {
   let unsubscribe;
   let terminalSettleTimer;
   const promise = new Promise((resolvePromise) => {
-    let stdout = "";
+    const outputCollector = createAssistantOutputCollector();
     let streamedTextCount = 0;
     let textQueue = Promise.resolve();
     let textDeliveryError = "";
@@ -212,7 +212,7 @@ async function startRpcProcess(args, {
           resolvePromise({
             ok: false,
             code: null,
-            stdout: outputTextFromJson(stdout) || terminalTranscriptText,
+            stdout: outputCollector.text() || terminalTranscriptText,
             stderr: message,
             streamedTextCount,
           });
@@ -280,7 +280,7 @@ async function startRpcProcess(args, {
         void finish({
           ok: true,
           code: 0,
-          stdout: outputTextFromJson(stdout) || terminalTranscriptText,
+          stdout: outputCollector.text() || terminalTranscriptText,
           stderr: client.getStderr().trim(),
           streamedTextCount,
         });
@@ -305,8 +305,6 @@ async function startRpcProcess(args, {
     unsubscribe = client.onEvent((event) => {
       refreshIdleTimer();
       onEvent?.(event);
-      const line = JSON.stringify(event);
-      stdout += `${line}\n`;
 
       if (event.type === "message_start" && event.message?.role === "assistant") {
         streamedAssistantParts = [];
@@ -319,7 +317,7 @@ async function startRpcProcess(args, {
         }
       }
 
-      const streamedText = textFromJsonEvent(line);
+      const streamedText = outputCollector.consume(event);
       if (streamedText) {
         streamedAssistantParts.push(streamedText);
         enqueueText(streamedText);
@@ -341,7 +339,7 @@ async function startRpcProcess(args, {
         void finish({
           ok: true,
           code: 0,
-          stdout: outputTextFromJson(stdout) || terminalTranscriptText,
+          stdout: outputCollector.text() || terminalTranscriptText,
           stderr: client.getStderr().trim(),
           streamedTextCount,
         });
@@ -352,7 +350,7 @@ async function startRpcProcess(args, {
       void finish({
         ok: false,
         code: 1,
-        stdout: outputTextFromJson(stdout) || terminalTranscriptText,
+        stdout: outputCollector.text() || terminalTranscriptText,
         stderr: `${error.message}${client.getStderr() ? `\n${client.getStderr().trim()}` : ""}`.trim(),
         streamedTextCount,
       });
@@ -453,22 +451,25 @@ function textFromPiContent(content) {
     .join("\n\n");
 }
 
-function textFromJsonEvent(line) {
-  if (!line.trim()) return "";
-  const event = parseJsonLine(line);
-  if (!event || event.type !== "message_update") return "";
-  const messageEvent = event.assistantMessageEvent;
-  if (messageEvent?.type !== "text_end") return "";
-  return String(messageEvent.content || "").trim();
-}
-
-function outputTextFromJson(output) {
+// RPC events repeat growing partial messages and may end with the complete
+// transcript in agent_end. Retaining their serialized JSON makes memory usage
+// quadratic on long/tool-heavy turns. Keep only finalized assistant text—the
+// sole part used as the run's stdout fallback.
+export function createAssistantOutputCollector() {
   const chunks = [];
-  for (const line of output.split("\n")) {
-    const text = textFromJsonEvent(line);
-    if (text) chunks.push(text);
-  }
-  return chunks.join("\n\n").trim();
+  return {
+    consume(event) {
+      if (event?.type !== "message_update") return "";
+      const messageEvent = event.assistantMessageEvent;
+      if (messageEvent?.type !== "text_end") return "";
+      const text = String(messageEvent.content || "").trim();
+      if (text) chunks.push(text);
+      return text;
+    },
+    text() {
+      return chunks.join("\n\n").trim();
+    },
+  };
 }
 
 function parseJsonLine(line) {
