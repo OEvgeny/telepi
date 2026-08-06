@@ -72,6 +72,7 @@ export function buildPiRunSpec(config, topic, envelope, options = {}) {
       TELEPI_MESSAGE_ID: envelope.messageId || "",
       TELEPI_TOPIC_NAME: topic.name || "",
       TELEPI_AGENT_ID: topic.agent || "",
+      TELEPI_USER_MESSAGE: envelope.text || "",
       TELEPI_BOT_TOKEN: options.botToken ?? getBotToken(config),
       TELEPI_BUTTON_STORE: resolvePath(config.project.cache_dir, "button-callbacks.jsonl"),
     },
@@ -320,17 +321,28 @@ async function startRpcProcess(args, {
       const streamedText = outputCollector.consume(event);
       if (streamedText) {
         streamedAssistantParts.push(streamedText);
-        enqueueText(streamedText);
+        // Do NOT stream intermediate assistant text here: every completed
+        // text_end (including working narration between tool calls) would
+        // become a separate Telegram message, flooding the chat on multi-
+        // step turns. The final answer is delivered by the message_end
+        // fallback below (final text that differs from the accumulated parts)
+        // and by pollTranscript (stopReason "stop" only).
       }
 
       // Some provider/transport paths persist message_end without emitting a
       // usable text_end delta. Deliver the finalized assistant text as a
-      // fallback, while avoiding duplication when text_end was observed.
-      if (event.type === "message_end" && event.message?.role === "assistant") {
+      // fallback, but ONLY for the terminal message (stopReason "stop"):
+      // intermediate tool-calling turns carry working narration that must
+      // never reach the chat as its own message. The accumulated parts (from
+      // text_end deltas) and the message content agree for the final answer;
+      // enqueue whichever is non-empty so the live path is prompt and the
+      // transcript-poll path (below) is the authoritative fallback.
+      if (event.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason === "stop") {
         const finalText = textFromPiContent(event.message.content).trim();
         const streamedTextCombined = streamedAssistantParts.join("\n\n").trim();
-        if (finalText && finalText !== streamedTextCombined) enqueueText(finalText);
-        if (event.message.stopReason === "stop") scheduleTerminalSettle();
+        const delivered = streamedTextCombined || finalText;
+        if (delivered) enqueueText(delivered);
+        scheduleTerminalSettle();
       }
 
       // agent_end is only a low-level boundary and may still be followed by
