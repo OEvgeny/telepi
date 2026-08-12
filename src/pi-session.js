@@ -291,6 +291,15 @@ async function startRpcProcess(args, {
     const pollTranscript = () => {
       for (const entry of readSessionTranscriptEntries(transcriptCursor)) {
         const message = entry?.type === "message" ? entry.message : null;
+        // A steer can be persisted immediately after the preceding terminal
+        // assistant message, before transcript polling sees either entry. Walk
+        // them in order: the newer user turn invalidates that older terminal
+        // settle timer even when its message_start event arrived first.
+        if (message?.role === "user") {
+          initialUserMessageSeen = true;
+          clearTimeout(terminalSettleTimer);
+          continue;
+        }
         if (message?.role !== "assistant" || message.stopReason !== "stop") continue;
         const finalText = textFromPiContent(message.content).trim();
         if (!finalText) continue;
