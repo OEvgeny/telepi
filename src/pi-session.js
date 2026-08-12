@@ -289,24 +289,15 @@ async function startRpcProcess(args, {
     };
 
     const pollTranscript = () => {
-      for (const entry of readSessionTranscriptEntries(transcriptCursor)) {
-        const message = entry?.type === "message" ? entry.message : null;
-        // A steer can be persisted immediately after the preceding terminal
-        // assistant message, before transcript polling sees either entry. Walk
-        // them in order: the newer user turn invalidates that older terminal
-        // settle timer even when its message_start event arrived first.
-        if (message?.role === "user") {
-          initialUserMessageSeen = true;
-          clearTimeout(terminalSettleTimer);
-          continue;
-        }
-        if (message?.role !== "assistant" || message.stopReason !== "stop") continue;
-        const finalText = textFromPiContent(message.content).trim();
-        if (!finalText) continue;
+      const update = summarizeTranscriptLifecycle(readSessionTranscriptEntries(transcriptCursor));
+      for (const finalText of update.finalTexts) {
         terminalTranscriptText = finalText;
         enqueueText(finalText);
-        scheduleTerminalSettle();
       }
+      // The newest persisted message owns the fallback timer. In particular, a
+      // steered user message can follow a terminal answer in the same read.
+      if (update.settleAction === "schedule") scheduleTerminalSettle();
+      if (update.settleAction === "clear") clearTimeout(terminalSettleTimer);
     };
     transcriptTimer = setInterval(pollTranscript, 500);
     transcriptTimer.unref?.();
@@ -461,6 +452,28 @@ function readSessionTranscriptEntries(cursor) {
   } catch {
     return [];
   }
+}
+
+export function summarizeTranscriptLifecycle(entries) {
+  const finalTexts = [];
+  let settleAction = "none";
+  for (const entry of entries || []) {
+    if (entry?.type !== "message") continue;
+    const message = entry.message;
+    if (message?.role === "assistant" && message.stopReason === "stop") {
+      const finalText = textFromPiContent(message.content).trim();
+      if (finalText) {
+        finalTexts.push(finalText);
+        settleAction = "schedule";
+        continue;
+      }
+    }
+    // Any later persisted message means an older terminal assistant is no
+    // longer the active lifecycle. This includes steered users, tool work, and
+    // non-text terminal messages.
+    settleAction = "clear";
+  }
+  return { finalTexts, settleAction };
 }
 
 function textFromPiContent(content) {
