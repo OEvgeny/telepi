@@ -181,6 +181,7 @@ async function startRpcProcess(args, {
     // RpcClient launches the CLI with the bare command "node". Keep that
     // spawn working even when the gateway starts before a login PATH exists.
     env: {
+      ...piColorEnvironment(process.env),
       ...env,
       PATH: prependExecutableDirToPath(process.execPath, env.PATH ?? process.env.PATH),
     },
@@ -452,6 +453,21 @@ function readSessionTranscriptEntries(cursor) {
   } catch {
     return [];
   }
+}
+
+// RpcClient pipes pi's output and systemd supplies TERM=dumb, so color-aware
+// diagnostics need an explicit terminal capability and color level.
+export function piColorEnvironment(env = process.env) {
+  const colorEnv = {
+    TERM: !env.TERM || env.TERM === "dumb" ? "xterm-256color" : env.TERM,
+    COLORTERM: env.COLORTERM || "truecolor",
+  };
+  if (env.FORCE_COLOR !== undefined) {
+    colorEnv.FORCE_COLOR = env.FORCE_COLOR;
+  } else if (env.NO_COLOR === undefined) {
+    colorEnv.FORCE_COLOR = "3";
+  }
+  return colorEnv;
 }
 
 export function summarizeTranscriptLifecycle(entries) {
