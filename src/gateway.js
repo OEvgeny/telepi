@@ -159,6 +159,8 @@ function summarizeMessageAttachmentsForLog(message) {
   const attachments = [];
   if (Array.isArray(message.photo) && message.photo.length) attachments.push("photo");
   if (message.document) attachments.push(`document:${message.document.file_name || message.document.mime_type || "unnamed"}`);
+  if (message.voice) attachments.push(`voice:${message.voice.mime_type || "audio/ogg"}`);
+  if (message.audio) attachments.push(`audio:${message.audio.file_name || message.audio.mime_type || "unnamed"}`);
   return attachments.join(",");
 }
 

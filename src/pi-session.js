@@ -110,7 +110,11 @@ function formatTelegramMessage(topic, envelope) {
     ...(envelope.source ? [`telepi_message_source=${envelope.source}`] : []),
     ...(envelope.replyTo ? ["", "Telegram reply context:", ...formatReplyContext(envelope.replyTo)] : []),
     ...(envelope.attachments?.length
-      ? ["", "Attachments (use the read tool on the path to view the content):", ...envelope.attachments.map(formatAttachment)]
+      ? [
+        "",
+        "Attachments (use transcribe_file for audio/video; use read for supported image/text content):",
+        ...envelope.attachments.map(formatAttachment),
+      ]
       : []),
   ];
 

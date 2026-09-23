@@ -364,24 +364,53 @@ function getMessageAttachments(message) {
       fileSize: message.document.file_size,
     });
   }
+  if (message.voice) {
+    attachments.push({
+      kind: "voice",
+      fileId: message.voice.file_id,
+      mimeType: message.voice.mime_type || "audio/ogg",
+      fileSize: message.voice.file_size,
+    });
+  }
+  if (message.audio) {
+    attachments.push({
+      kind: "audio",
+      fileId: message.audio.file_id,
+      mimeType: message.audio.mime_type || "audio/mpeg",
+      fileName: message.audio.file_name,
+      fileSize: message.audio.file_size,
+    });
+  }
   return attachments;
 }
 
 function attachmentType(attachment) {
-  return attachment.mimeType?.startsWith("image/") ? "image" : "file";
+  const mimeType = attachment.mimeType?.toLowerCase() || "";
+  if (mimeType.startsWith("image/")) return "image";
+  if (["voice", "audio"].includes(attachment.kind) || mimeType.startsWith("audio/")) return "audio";
+  return "file";
 }
 
 function attachmentExtension(fileName, mimeType, type) {
   const fromName = fileName?.match(/\.[A-Za-z0-9]{1,8}$/)?.[0];
   if (fromName) return fromName.toLowerCase();
-  if (mimeType === "image/png") return ".png";
-  if (mimeType === "image/webp") return ".webp";
-  if (mimeType === "image/gif") return ".gif";
-  if (mimeType === "image/jpeg") return ".jpg";
-  if (mimeType === "application/pdf") return ".pdf";
-  if (mimeType === "text/plain") return ".txt";
-  if (mimeType === "text/markdown") return ".md";
-  if (mimeType === "application/json") return ".json";
+  const normalizedMimeType = String(mimeType || "").split(";", 1)[0].trim().toLowerCase();
+  if (normalizedMimeType === "image/png") return ".png";
+  if (normalizedMimeType === "image/webp") return ".webp";
+  if (normalizedMimeType === "image/gif") return ".gif";
+  if (normalizedMimeType === "image/jpeg") return ".jpg";
+  if (["audio/ogg", "application/ogg"].includes(normalizedMimeType)) return ".ogg";
+  if (normalizedMimeType === "audio/opus") return ".opus";
+  if (normalizedMimeType === "audio/mpeg") return ".mp3";
+  if (["audio/mp4", "audio/x-m4a"].includes(normalizedMimeType)) return ".m4a";
+  if (["audio/wav", "audio/x-wav"].includes(normalizedMimeType)) return ".wav";
+  if (normalizedMimeType === "audio/flac") return ".flac";
+  if (normalizedMimeType === "audio/webm") return ".webm";
+  if (normalizedMimeType === "audio/aac") return ".aac";
+  if (normalizedMimeType === "application/pdf") return ".pdf";
+  if (normalizedMimeType === "text/plain") return ".txt";
+  if (normalizedMimeType === "text/markdown") return ".md";
+  if (normalizedMimeType === "application/json") return ".json";
   return type === "image" ? ".jpg" : ".bin";
 }
 
