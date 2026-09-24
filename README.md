@@ -2,7 +2,7 @@
 
 Telegram topic gateway for [pi](https://github.com/badlogic/pi-mono) agents.
 
-The gateway watches Telegram bot updates, extracts `chat_id` and `message_thread_id`, looks up that pair in `config/telepi.yaml`, and routes the message to the bound pi session. Unknown topics are ignored so another machine can own them.
+The gateway watches Telegram bot updates, extracts `chat_id` and `message_thread_id`, looks up that pair in `config/telepi.yaml`, and routes the message to the bound pi session. Unknown topics are ignored so another machine can own them. `src/gateway.js` owns broker and pi-session orchestration; the concrete in-process Telegram polling, hydration, callback, and rendering code lives in `src/telegram-adapter.js`.
 
 ## Setup
 

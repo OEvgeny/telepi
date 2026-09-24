@@ -70,7 +70,9 @@ test("broker messages use a transport-neutral routing header and expose the brok
   const topic = resolveBrokerTarget(config, submit.target);
   const envelope = createBrokerEnvelope(topic, submit);
   const previousToken = process.env.TEST_TOKEN;
+  const previousBrokerSocket = process.env.TELEPI_BROKER_SOCKET;
   process.env.TEST_TOKEN = "test-token";
+  delete process.env.TELEPI_BROKER_SOCKET;
   try {
     const spec = buildPiRunSpec(config, topic, envelope);
     assert.match(spec.initialMessage, /^Telepi broker route: Primary/m);
@@ -82,6 +84,8 @@ test("broker messages use a transport-neutral routing header and expose the brok
   } finally {
     if (previousToken === undefined) delete process.env.TEST_TOKEN;
     else process.env.TEST_TOKEN = previousToken;
+    if (previousBrokerSocket === undefined) delete process.env.TELEPI_BROKER_SOCKET;
+    else process.env.TELEPI_BROKER_SOCKET = previousBrokerSocket;
   }
 });
 
