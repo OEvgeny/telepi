@@ -52,7 +52,7 @@ const envelope = {
 test("SDK driver starts the routed worker while preserving the gateway run spec", () => {
   const spec = buildSdkRunSpec(config, config.topics[0], envelope, { botToken: "test-token" });
 
-  assert.match(spec.cliPath, /\/src\/pi\/worker\.js$/);
+  assert.match(spec.workerPath, /\/src\/pi\/worker\.js$/);
   assert.deepEqual(spec.args, [
     "--config", config._path,
     "--chat-id", "1",

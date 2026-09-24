@@ -6,7 +6,7 @@ import {
   normalizeBrokerSubmitRequest,
   resolveBrokerTarget,
 } from "../src/broker-message.js";
-import { buildPiRunSpec } from "../src/pi/cli-driver.js";
+import { buildTopicRunSpec } from "../src/pi/topic-spec.js";
 
 const config = {
   telegram: { bot_token_env: "TEST_TOKEN" },
@@ -74,7 +74,7 @@ test("broker messages use a transport-neutral routing header and expose the brok
   process.env.TEST_TOKEN = "test-token";
   delete process.env.TELEPI_BROKER_SOCKET;
   try {
-    const spec = buildPiRunSpec(config, topic, envelope);
+    const spec = buildTopicRunSpec(config, topic, envelope);
     assert.match(spec.initialMessage, /^Telepi broker route: Primary/m);
     assert.match(spec.initialMessage, /^telepi_sender_kind=agent$/m);
     assert.match(spec.initialMessage, /^telepi_sender_agent_id=sender$/m);

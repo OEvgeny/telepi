@@ -1,21 +1,16 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildPiRunSpec, formatTopicMessage, startRpcProcess } from "./cli-driver.js";
+import { startRpcRun } from "./rpc-run.js";
 import { piRpcBroker } from "./rpc-transport.js";
+import { buildTopicRunSpec, formatTopicMessage } from "./topic-spec.js";
 
 const WORKER_PATH = fileURLToPath(new URL("./worker.js", import.meta.url));
 
-// Gateway-side driver for the Telepi-aware SDK worker. The stock CLI driver is
-// retained during rollout, while both paths share the proven RPC lifecycle.
-export async function runPiForTopic(config, topic, envelope, options = {}) {
-  const run = await startPiForTopic(config, topic, envelope, options);
-  return run.promise;
-}
-
+// Gateway-side driver for the Telepi-aware SDK worker.
 export async function startPiForTopic(config, topic, envelope, options = {}) {
   const spec = buildSdkRunSpec(config, topic, envelope, options);
-  return startRpcProcess(spec.args, {
-    cliPath: spec.cliPath,
+  return startRpcRun(spec.args, {
+    workerPath: spec.workerPath,
     cwd: spec.cwd,
     idleTimeoutMs: spec.idleTimeoutMs,
     hardTimeoutMs: spec.hardTimeoutMs,
@@ -40,9 +35,8 @@ export function buildSdkRunSpec(config, topic, envelope, options = {}) {
   }
   if (!config._path) throw new Error("The SDK worker requires the loaded Telepi config path");
 
-  // Reuse the legacy driver's transport formatting and environment while the
-  // two drivers coexist. Runtime construction itself happens only in worker.js.
-  const base = buildPiRunSpec(config, topic, envelope, options);
+  // Runtime construction itself happens only in worker.js.
+  const base = buildTopicRunSpec(config, topic, envelope, options);
   const configuredSessionId = String(topic.session_id || base.agent.session_id || `${topic.agent}-${topic.topic_id}`);
   if (base.sessionId !== configuredSessionId) {
     throw new Error(`The SDK worker session override does not match the configured topic: ${base.sessionId}`);
@@ -50,7 +44,7 @@ export function buildSdkRunSpec(config, topic, envelope, options = {}) {
 
   return {
     ...base,
-    cliPath: WORKER_PATH,
+    workerPath: WORKER_PATH,
     args: [
       "--config", resolve(config._path),
       "--chat-id", String(topic.chat_id),

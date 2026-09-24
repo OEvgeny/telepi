@@ -52,7 +52,7 @@ process.stdin.on("data", (chunk) => {
   );
 
   const client = rpcBroker.createClient({
-    cliPath: workerPath,
+    workerPath,
     cwd: directory,
     env: { TELEPI_BROKER_SOCKET: socketPath },
     args: [],

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createAssistantOutputCollector } from "../src/pi/cli-driver.js";
+import { createAssistantOutputCollector } from "../src/pi/rpc-run.js";
 
 test("pi output collector retains only finalized assistant text", () => {
   const collector = createAssistantOutputCollector();

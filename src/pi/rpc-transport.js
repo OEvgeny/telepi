@@ -75,7 +75,7 @@ class BrokerRpcClient {
       RPC_BRIDGE_PATH,
       "--socket", socketPath,
       "--run-id", this.runId,
-      "--worker", this.options.cliPath,
+      "--worker", this.options.workerPath,
       "--",
       "--mode", "rpc",
       ...(this.options.args || []),

@@ -16,7 +16,7 @@ import {
 import { TelegramClient, normalizeTopicColor, resolveForumTopicIcon } from "../src/telegram/client.js";
 import { blockquoteEntities, toTelegramMarkdownV2 } from "../src/telegram/format.js";
 import { BROKER_PROTOCOL_VERSION, requestBroker, resolveBrokerSocketPath } from "../src/broker-ipc.js";
-import { buildPiRunSpec } from "../src/pi/cli-driver.js";
+import { buildPiCliSpec } from "../src/pi/cli-command.js";
 
 const program = new Command();
 
@@ -419,7 +419,7 @@ program
       text,
       attachments: [],
     };
-    const spec = buildPiRunSpec(config, topic, envelope, {
+    const spec = buildPiCliSpec(config, topic, envelope, {
       session: options.session,
       fork: options.fork,
       sessionId: options.sessionId,

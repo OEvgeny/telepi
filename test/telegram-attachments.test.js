@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { buildPiRunSpec } from "../src/pi/cli-driver.js";
+import { buildTopicRunSpec } from "../src/pi/topic-spec.js";
 import { hydrateEnvelopeMedia, updateToEnvelope } from "../src/telegram/client.js";
 
 function telegramUpdate(media) {
@@ -133,7 +133,7 @@ test("agent attachment guidance directs audio to transcribe_file", (t) => {
     }],
   };
 
-  const spec = buildPiRunSpec(config, topic, envelope, { botToken: "test-token" });
+  const spec = buildTopicRunSpec(config, topic, envelope, { botToken: "test-token" });
   assert.match(spec.initialMessage, /use transcribe_file for audio\/video/);
   assert.match(spec.initialMessage, /- audio: \/tmp\/voice\.ogg/);
   assert.doesNotMatch(spec.initialMessage, /use the read tool on the path/);

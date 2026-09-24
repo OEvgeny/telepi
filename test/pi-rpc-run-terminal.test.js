@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createPendingControlTracker, summarizeTranscriptLifecycle } from "../src/pi/cli-driver.js";
+import { createPendingControlTracker, summarizeTranscriptLifecycle } from "../src/pi/rpc-run.js";
 
 const message = (role, content, stopReason) => ({
   type: "message",
