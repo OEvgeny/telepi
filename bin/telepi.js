@@ -387,7 +387,7 @@ program
 
 program
   .command("topic:pi-command")
-  .description("Print the pi CLI command telepi would use for a mapped topic")
+  .description("Print a stock Pi CLI approximation for debugging (the gateway uses the SDK worker)")
   .option("--topic <name>", "Existing topic mapping name")
   .option("--agent <id>", "Configured agent id; allowed only when it has exactly one enabled topic")
   .option("--text <text>", "Prompt text to include with -p")

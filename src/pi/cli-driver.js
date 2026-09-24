@@ -24,7 +24,7 @@ export async function startPiForTopic(config, topic, envelope, options = {}) {
     initialMessage: spec.initialMessage,
     sessionDir: config.project.sessions_dir,
     sessionId: spec.sessionId,
-    steerMessage: (steerEnvelope) => formatTelegramMessage(topic, withAliasName(config, steerEnvelope)),
+    steerMessage: (steerEnvelope) => formatTopicMessage(config, topic, steerEnvelope),
   });
 }
 
@@ -80,7 +80,7 @@ export function buildPiRunSpec(config, topic, envelope, options = {}) {
       TELEPI_BUTTON_STORE: resolvePath(config.project.cache_dir, "button-callbacks.jsonl"),
       TELEPI_BROKER_SOCKET: resolveBrokerSocketPath(config),
     },
-    initialMessage: formatTelegramMessage(topic, withAliasName(config, envelope)),
+    initialMessage: formatTopicMessage(config, topic, envelope),
     // Silence is not proof of a stalled run: a tool or provider request can work
     // for a long time without emitting pi events. Never apply a destructive idle
     // timeout by default; cancellation stays user-driven. Operators may still
@@ -90,6 +90,10 @@ export function buildPiRunSpec(config, topic, envelope, options = {}) {
     sessionId: String(sessionId),
     agent,
   };
+}
+
+export function formatTopicMessage(config, topic, envelope) {
+  return formatTelegramMessage(topic, withAliasName(config, envelope));
 }
 
 // Agents should always see one stable name per person, regardless of the
@@ -195,7 +199,11 @@ function formatAttachment(attachment) {
   ].filter(Boolean).join("\n");
 }
 
-async function startRpcProcess(args, {
+// Shared temporarily by the stock CLI and SDK worker drivers while the new
+// worker path is proven in production. The RPC lifecycle and gateway-facing
+// run contract are identical whichever child owns the Pi runtime.
+export async function startRpcProcess(args, {
+  cliPath = resolvePiCliPath(),
   cwd,
   idleTimeoutMs,
   hardTimeoutMs,
@@ -213,7 +221,7 @@ async function startRpcProcess(args, {
   const transcriptCursor = createSessionTranscriptCursor(sessionDir, sessionId);
   const { RpcClient } = await loadPiModule();
   const client = new RpcClient({
-    cliPath: resolvePiCliPath(),
+    cliPath,
     cwd: resolve(cwd),
     // RpcClient launches the CLI with the bare command "node". Keep that
     // spawn working even when the gateway starts before a login PATH exists.
@@ -227,6 +235,7 @@ async function startRpcProcess(args, {
 
   let unsubscribe;
   let terminalSettleTimer;
+  const controlTracker = createPendingControlTracker();
   const promise = new Promise((resolvePromise) => {
     const outputCollector = createAssistantOutputCollector();
     let streamedTextCount = 0;
@@ -275,6 +284,10 @@ async function startRpcProcess(args, {
       settled = true;
       cleanup();
       await textQueue;
+      // Pi can emit agent_settled before the RPC response to the abort command
+      // that caused it. Do not terminate the worker under an accepted control
+      // request; let its correlated response reach RpcClient first.
+      await controlTracker.wait();
       if (textDeliveryError) {
         result.stderr = `${result.stderr ? `${result.stderr}\n` : ""}Streaming text delivery failed: ${textDeliveryError}`;
       }
@@ -408,12 +421,8 @@ async function startRpcProcess(args, {
 
   return {
     promise,
-    abort: async () => {
-      await client.abort();
-    },
-    steer: async (envelope) => {
-      await client.steer(steerMessage(envelope));
-    },
+    abort: () => controlTracker.track(() => client.abort()),
+    steer: (envelope) => controlTracker.track(() => client.steer(steerMessage(envelope))),
   };
 }
 
@@ -489,6 +498,22 @@ function readSessionTranscriptEntries(cursor) {
   } catch {
     return [];
   }
+}
+
+export function createPendingControlTracker() {
+  const pending = new Set();
+  return {
+    track(operation) {
+      const promise = Promise.resolve().then(operation);
+      const settled = promise.then(() => undefined, () => undefined);
+      pending.add(settled);
+      settled.then(() => pending.delete(settled));
+      return promise;
+    },
+    async wait() {
+      while (pending.size) await Promise.all([...pending]);
+    },
+  };
 }
 
 export function summarizeTranscriptLifecycle(entries) {

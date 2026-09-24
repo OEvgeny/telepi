@@ -2,7 +2,7 @@
 
 Telegram topic gateway for [pi](https://github.com/badlogic/pi-mono) agents.
 
-The gateway watches Telegram bot updates, extracts `chat_id` and `message_thread_id`, looks up that pair in `config/telepi.yaml`, and routes the message to the bound pi session. Unknown topics are ignored so another machine can own them. `src/gateway.js` owns broker and session-queue orchestration, `src/pi/cli-driver.js` owns the concrete stock-Pi CLI/RPC run boundary, and `src/telegram/adapter.js` owns concrete in-process Telegram polling, hydration, callbacks, and rendering.
+The gateway watches Telegram bot updates, extracts `chat_id` and `message_thread_id`, looks up that pair in `config/telepi.yaml`, and routes the message to the bound pi session. Unknown topics are ignored so another machine can own them. `src/gateway.js` owns broker and session-queue orchestration, `src/pi/sdk-driver.js` controls a fresh Telepi-aware SDK worker for each run, and `src/telegram/adapter.js` owns concrete in-process Telegram polling, hydration, callbacks, and rendering. The former stock-Pi path remains in `src/pi/cli-driver.js` temporarily as a rollout fallback and debugging aid.
 
 ## Setup
 
@@ -13,15 +13,17 @@ The gateway watches Telegram bot updates, extracts `chat_id` and `message_thread
 
 ## Pi Grounding
 
-The gateway scopes pi execution per topic with:
+For every run the gateway starts `src/pi/worker.js` as a fresh child process. The worker loads the installed Pi SDK, verifies that the configured chat/topic still points at the expected agent and session, builds the topic runtime, and delegates Pi's native JSONL protocol to `runRpcMode()`.
 
-- `--session-id <id>` for stable session identity
-- `--session-dir <dir>` for shared session storage
-- `--skill <path>` for agent-specific `SKILL.md` instructions
-- `--extension <path>` for agent-specific pi extensions
-- `--model <provider/model>` from per-topic config; topics without their own model inherit from the agent's main topic
+The runtime combines:
 
-The gateway also runs `pi` from the entity folder, so project-local context files such as `AGENTS.md` are scoped to that entity.
+- the configured session id and shared Telepi session directory;
+- agent-specific skills and extensions;
+- project-wide extensions;
+- the topic model override, or the agent's main-topic model;
+- Pi's normal host credential and model stores.
+
+The worker currently uses the entity folder as Pi's cwd, preserving project-local context such as the entity's `AGENTS.md`. Pi's SDK remains inside the fresh worker rather than the long-running gateway, so Pi upgrades cannot leave a stale model/runtime catalog cached in the service process.
 
 ## Commands
 
