@@ -58,7 +58,7 @@ The gateway should:
 
 It should not:
 
-- import the pi SDK or `src/pi-session.js`;
+- import the pi SDK or `src/pi-cli-driver.js`;
 - own an RPC client, pi PID, transcript cursor, session lock, model error, or compaction decision;
 - decide whether a message is steering versus queued;
 - retain the authoritative topic queue in a JavaScript `Map`;
@@ -89,7 +89,7 @@ A run worker should:
 
 - read a sealed run descriptor from disk;
 - acquire the session lock for its whole RPC lifetime;
-- start and own pi RPC using the current `src/pi-session.js` logic;
+- start and own pi RPC using the current `src/pi-cli-driver.js` logic;
 - write heartbeat and phase state independently of pi event silence;
 - poll or receive durable controls for steer and abort;
 - acknowledge steering only after `client.steer()` has accepted it;

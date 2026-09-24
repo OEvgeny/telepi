@@ -5,6 +5,8 @@ import { getAgent, getBotToken, resolveEntityDir, resolvePath, resolveTopicModel
 import { resolveBrokerSocketPath } from "./broker-ipc.js";
 import { prependExecutableDirToPath, resolvePiCliPath, resolvePiPackageIndex } from "./pi-path.js";
 
+// Concrete gateway-side driver for the stock Pi CLI/RPC process. Queueing,
+// delivery, and broker policy remain in the gateway.
 export async function runPiForTopic(config, topic, envelope, options = {}) {
   const run = await startPiForTopic(config, topic, envelope, options);
   return run.promise;
