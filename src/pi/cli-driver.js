@@ -214,23 +214,26 @@ export async function startRpcProcess(args, {
   steerMessage,
   sessionDir,
   sessionId,
+  createRpcClient,
 }) {
   // Capture the pre-prompt byte boundary. Pi persists messages before all RPC
   // lifecycle events have necessarily escaped the process, so the transcript
   // is the authoritative fallback when RPC wedges after writing a final answer.
   const transcriptCursor = createSessionTranscriptCursor(sessionDir, sessionId);
-  const { RpcClient } = await loadPiModule();
-  const client = new RpcClient({
+  const clientOptions = {
     cliPath,
     cwd: resolve(cwd),
-    // RpcClient launches the CLI with the bare command "node". Keep that
-    // spawn working even when the gateway starts before a login PATH exists.
+    // The stock RpcClient launches the CLI with the bare command "node". Keep
+    // that spawn working even when the gateway starts before a login PATH exists.
     env: {
       ...env,
       PATH: prependExecutableDirToPath(process.execPath, env.PATH ?? process.env.PATH),
     },
     args,
-  });
+  };
+  const client = createRpcClient
+    ? createRpcClient(clientOptions)
+    : new (await loadPiModule()).RpcClient(clientOptions);
   await client.start();
 
   let unsubscribe;

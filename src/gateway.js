@@ -10,7 +10,7 @@ import { parseCompactCommand } from "./pi/compact.js";
 import { normalizeBrokerSubmitRequest, resolveBrokerTarget, createBrokerEnvelope } from "./broker-message.js";
 import { resolveBrokerSocketPath, startBrokerIpcServer } from "./broker-ipc.js";
 import { normalizePromptInboxInterval, startPromptInboxPolling } from "./prompt-inbox.js";
-import { startPiForTopic } from "./pi/sdk-driver.js";
+import { acceptSdkRpcConnection, startPiForTopic } from "./pi/sdk-driver.js";
 import { installTimestampedConsole } from "./logging.js";
 
 installTimestampedConsole();
@@ -132,6 +132,7 @@ async function startBrokerApi(getConfig, telegram, inFlight) {
   const submissions = new Map();
   await startBrokerIpcServer({
     socketPath,
+    onConnection: acceptSdkRpcConnection,
     onRequest: async (value) => {
       const request = normalizeBrokerSubmitRequest(value);
       const signature = JSON.stringify(request);

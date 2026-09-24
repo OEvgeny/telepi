@@ -13,7 +13,7 @@ The gateway watches Telegram bot updates, extracts `chat_id` and `message_thread
 
 ## Pi Grounding
 
-For every run the gateway starts `src/pi/worker.js` as a fresh child process. The worker loads the installed Pi SDK, verifies that the configured chat/topic still points at the expected agent and session, builds the topic runtime, and delegates Pi's native JSONL protocol to `runRpcMode()`.
+For every run the gateway starts `src/pi/rpc-bridge.js`, which connects to the existing broker Unix socket and starts `src/pi/worker.js` as a fresh child process. The bridge passes Pi's native JSONL RPC bodies through that socket while retaining stdin/stdout only at the worker boundary. The worker loads the installed Pi SDK, verifies that the configured chat/topic still points at the expected agent and session, builds the topic runtime, and delegates the native protocol to `runRpcMode()`.
 
 The runtime combines:
 

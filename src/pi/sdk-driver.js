@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPiRunSpec, formatTopicMessage, startRpcProcess } from "./cli-driver.js";
+import { piRpcBroker } from "./rpc-transport.js";
 
 const WORKER_PATH = fileURLToPath(new URL("./worker.js", import.meta.url));
 
@@ -25,7 +26,12 @@ export async function startPiForTopic(config, topic, envelope, options = {}) {
     sessionDir: config.project.sessions_dir,
     sessionId: spec.sessionId,
     steerMessage: (steerEnvelope) => formatTopicMessage(config, topic, steerEnvelope),
+    createRpcClient: (clientOptions) => piRpcBroker.createClient(clientOptions),
   });
+}
+
+export function acceptSdkRpcConnection(frame, peer) {
+  return piRpcBroker.acceptConnection(frame, peer);
 }
 
 export function buildSdkRunSpec(config, topic, envelope, options = {}) {

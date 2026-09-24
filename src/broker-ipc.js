@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 export const BROKER_PROTOCOL_VERSION = 1;
 export const DEFAULT_BROKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_BROKER_FRAME_BYTES = 1024 * 1024;
+export const MAX_BROKER_RPC_FRAME_BYTES = 64 * 1024 * 1024;
 
 export function resolveBrokerSocketPath(config, env = process.env) {
   const configured = env.TELEPI_BROKER_SOCKET?.trim();
@@ -14,6 +15,7 @@ export function resolveBrokerSocketPath(config, env = process.env) {
 export async function startBrokerIpcServer({
   socketPath,
   onRequest,
+  onConnection,
   maxFrameBytes = MAX_BROKER_FRAME_BYTES,
 }) {
   if (!socketPath) throw new Error("broker socket path is required");
@@ -26,7 +28,7 @@ export async function startBrokerIpcServer({
   const server = createServer((socket) => {
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
-    handleServerConnection(socket, onRequest, maxFrameBytes);
+    handleServerConnection(socket, { onRequest, onConnection, maxFrameBytes });
   });
 
   await new Promise((resolvePromise, rejectPromise) => {
@@ -126,51 +128,152 @@ export async function requestBroker(socketPath, request, {
   });
 }
 
-function handleServerConnection(socket, onRequest, maxFrameBytes) {
-  let buffer = Buffer.alloc(0);
-  let handled = false;
-  socket.setTimeout(DEFAULT_BROKER_REQUEST_TIMEOUT_MS, () => socket.destroy());
+export function connectBrokerPeer(socketPath, {
+  maxFrameBytes = MAX_BROKER_FRAME_BYTES,
+} = {}) {
+  if (!socketPath) throw new Error("Telepi broker socket path is not configured");
+  return new Promise((resolvePromise, rejectPromise) => {
+    const socket = createConnection(socketPath);
+    const onError = (error) => {
+      socket.destroy();
+      const unavailable = error?.code === "ENOENT" || error?.code === "ECONNREFUSED";
+      rejectPromise(unavailable
+        ? new Error(`Telepi broker is unavailable at ${socketPath}`)
+        : error);
+    };
+    socket.once("error", onError);
+    socket.once("connect", () => {
+      socket.off("error", onError);
+      resolvePromise(createJsonlPeer(socket, { maxFrameBytes }));
+    });
+  });
+}
 
-  const respond = (response) => {
-    if (socket.destroyed) return;
-    socket.end(`${JSON.stringify(response)}\n`);
+export function createJsonlPeer(socket, {
+  maxFrameBytes = MAX_BROKER_FRAME_BYTES,
+} = {}) {
+  let frameLimit = maxFrameBytes;
+  let buffer = Buffer.alloc(0);
+  let terminalError;
+  const frames = [];
+  const readers = [];
+
+  const rejectReaders = (error) => {
+    while (readers.length) readers.shift().reject(error);
+  };
+  const fail = (error) => {
+    if (terminalError) return;
+    terminalError = error instanceof Error ? error : new Error(String(error));
+    rejectReaders(terminalError);
+  };
+  const deliver = (frame) => {
+    const reader = readers.shift();
+    if (reader) reader.resolve(frame);
+    else frames.push(frame);
   };
 
   socket.on("data", (chunk) => {
-    if (handled) return;
+    if (terminalError) return;
     buffer = Buffer.concat([buffer, chunk]);
-    if (buffer.length > maxFrameBytes) {
-      handled = true;
-      respond({ type: "response", success: false, error: `Broker request exceeds ${maxFrameBytes} bytes` });
-      return;
+    while (true) {
+      const newline = buffer.indexOf(0x0a);
+      if (newline < 0) break;
+      if (newline > frameLimit) {
+        fail(new Error(`Telepi broker frame exceeds ${frameLimit} bytes`));
+        return;
+      }
+      const line = buffer.subarray(0, newline).toString("utf8").replace(/\r$/, "");
+      buffer = buffer.subarray(newline + 1);
+      try {
+        deliver(JSON.parse(line));
+      } catch (error) {
+        fail(new Error(`Invalid Telepi broker frame JSON: ${error.message}`));
+        return;
+      }
     }
-
-    const newline = buffer.indexOf(0x0a);
-    if (newline < 0) return;
-    handled = true;
-    const trailing = buffer.subarray(newline + 1).toString("utf8").trim();
-    if (trailing) {
-      respond({ type: "response", success: false, error: "Broker accepts one request per connection" });
-      return;
+    if (buffer.length > frameLimit) {
+      fail(new Error(`Telepi broker frame exceeds ${frameLimit} bytes`));
     }
-
-    let request;
-    try {
-      request = JSON.parse(buffer.subarray(0, newline).toString("utf8").replace(/\r$/, ""));
-    } catch (error) {
-      respond({ type: "response", success: false, error: `Invalid broker request JSON: ${error.message}` });
-      return;
-    }
-
-    Promise.resolve(onRequest(request))
-      .then((data) => respond({ id: request?.id, type: "response", success: true, data }))
-      .catch((error) => respond({
-        id: request?.id,
-        type: "response",
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      }));
   });
+  socket.once("error", fail);
+  socket.once("end", () => fail(new Error("Telepi broker connection ended")));
+  socket.once("close", () => fail(new Error("Telepi broker connection closed")));
+
+  return {
+    get queuedFrameCount() {
+      return frames.length;
+    },
+    setMaxFrameBytes(value) {
+      if (!Number.isSafeInteger(value) || value <= 0) throw new Error("Invalid Telepi broker frame limit");
+      frameLimit = value;
+    },
+    read() {
+      if (frames.length) return Promise.resolve(frames.shift());
+      if (terminalError) return Promise.reject(terminalError);
+      return new Promise((resolvePromise, rejectPromise) => {
+        readers.push({ resolve: resolvePromise, reject: rejectPromise });
+      });
+    },
+    async send(frame) {
+      if (terminalError || socket.destroyed || !socket.writable) {
+        throw terminalError || new Error("Telepi broker connection is not writable");
+      }
+      const line = `${JSON.stringify(frame)}\n`;
+      if (Buffer.byteLength(line) > frameLimit + 1) {
+        throw new Error(`Telepi broker frame exceeds ${frameLimit} bytes`);
+      }
+      if (socket.write(line)) return;
+      await new Promise((resolvePromise, rejectPromise) => {
+        const onDrain = () => {
+          cleanup();
+          resolvePromise();
+        };
+        const onError = (error) => {
+          cleanup();
+          rejectPromise(error);
+        };
+        const cleanup = () => {
+          socket.off("drain", onDrain);
+          socket.off("error", onError);
+        };
+        socket.once("drain", onDrain);
+        socket.once("error", onError);
+      });
+    },
+    end(frame) {
+      if (socket.destroyed) return;
+      if (frame === undefined) socket.end();
+      else socket.end(`${JSON.stringify(frame)}\n`);
+    },
+    destroy(error) {
+      socket.destroy(error);
+    },
+  };
+}
+
+async function handleServerConnection(socket, { onRequest, onConnection, maxFrameBytes }) {
+  socket.setTimeout(DEFAULT_BROKER_REQUEST_TIMEOUT_MS, () => socket.destroy());
+  const peer = createJsonlPeer(socket, { maxFrameBytes });
+  let request;
+  try {
+    request = await peer.read();
+    if (onConnection && await onConnection(request, peer)) {
+      socket.setTimeout(0);
+      return;
+    }
+    const data = await onRequest(request);
+    if (peer.queuedFrameCount) {
+      throw new Error("Broker accepts one request per connection");
+    }
+    peer.end({ id: request?.id, type: "response", success: true, data });
+  } catch (error) {
+    peer.end({
+      id: request?.id,
+      type: "response",
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 async function removeStaleSocket(socketPath) {
