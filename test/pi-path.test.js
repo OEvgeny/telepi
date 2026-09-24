@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
 
-import { prependExecutableDirToPath, resolvePiCliPath, resolvePiPackageIndex } from "../src/pi-path.js";
+import { prependExecutableDirToPath, resolvePiCliPath, resolvePiPackageIndex } from "../src/pi/path.js";
 
 function makePiInstall(root) {
   const binDir = join(root, ".npm", "bin");

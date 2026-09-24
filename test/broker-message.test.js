@@ -6,7 +6,7 @@ import {
   normalizeBrokerSubmitRequest,
   resolveBrokerTarget,
 } from "../src/broker-message.js";
-import { buildPiRunSpec } from "../src/pi-cli-driver.js";
+import { buildPiRunSpec } from "../src/pi/cli-driver.js";
 
 const config = {
   telegram: { bot_token_env: "TEST_TOKEN" },

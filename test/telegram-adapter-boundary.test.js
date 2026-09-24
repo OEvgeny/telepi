@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
-import { createTelegramAdapter } from "../src/telegram-adapter.js";
+import { createTelegramAdapter } from "../src/telegram/adapter.js";
 
 const root = resolve(new URL("..", import.meta.url).pathname);
 
 test("gateway composes the concrete Telegram adapter without owning Bot API mechanics", async () => {
   const [gateway, adapter] = await Promise.all([
     readFile(resolve(root, "src/gateway.js"), "utf8"),
-    readFile(resolve(root, "src/telegram-adapter.js"), "utf8"),
+    readFile(resolve(root, "src/telegram/adapter.js"), "utf8"),
   ]);
 
   assert.match(gateway, /createTelegramAdapter/);

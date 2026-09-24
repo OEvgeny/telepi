@@ -3,8 +3,8 @@ import { existsSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSyn
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { getAgent, resolveEntityDir, resolvePath, resolveTopicModel } from "./config.js";
-import { resolvePiPackageIndex } from "./pi-path.js";
+import { getAgent, resolveEntityDir, resolvePath, resolveTopicModel } from "../config.js";
+import { resolvePiPackageIndex } from "./path.js";
 
 let piModulePromise;
 

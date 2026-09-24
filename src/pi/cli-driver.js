@@ -1,9 +1,9 @@
 import { closeSync, mkdirSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { getAgent, getBotToken, resolveEntityDir, resolvePath, resolveTopicModel } from "./config.js";
-import { resolveBrokerSocketPath } from "./broker-ipc.js";
-import { prependExecutableDirToPath, resolvePiCliPath, resolvePiPackageIndex } from "./pi-path.js";
+import { getAgent, getBotToken, resolveEntityDir, resolvePath, resolveTopicModel } from "../config.js";
+import { resolveBrokerSocketPath } from "../broker-ipc.js";
+import { prependExecutableDirToPath, resolvePiCliPath, resolvePiPackageIndex } from "./path.js";
 
 // Concrete gateway-side driver for the stock Pi CLI/RPC process. Queueing,
 // delivery, and broker policy remain in the gateway.

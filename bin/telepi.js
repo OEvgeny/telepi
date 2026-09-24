@@ -13,10 +13,10 @@ import {
   serializableConfig,
   writeConfig,
 } from "../src/config.js";
-import { TelegramClient, normalizeTopicColor, resolveForumTopicIcon } from "../src/telegram.js";
-import { blockquoteEntities, toTelegramMarkdownV2 } from "../src/telegram-format.js";
+import { TelegramClient, normalizeTopicColor, resolveForumTopicIcon } from "../src/telegram/client.js";
+import { blockquoteEntities, toTelegramMarkdownV2 } from "../src/telegram/format.js";
 import { BROKER_PROTOCOL_VERSION, requestBroker, resolveBrokerSocketPath } from "../src/broker-ipc.js";
-import { buildPiRunSpec } from "../src/pi-cli-driver.js";
+import { buildPiRunSpec } from "../src/pi/cli-driver.js";
 
 const program = new Command();
 
@@ -377,7 +377,7 @@ program
     // What appears in the agent's voice must also enter the agent's memory —
     // otherwise it has no idea it "said" this when the user replies to it.
     if (options.record) {
-      const { appendTopicSessionNote } = await import("../src/pi-compact.js");
+      const { appendTopicSessionNote } = await import("../src/pi/compact.js");
       const ids = sentMessages.map((message) => message.message_id).join(",");
       const recorded = await appendTopicSessionNote(config, topic,
         `The following message was posted to your Telegram topic in your name via topic:send (message id ${ids}). You did not compose it in this conversation, but the user sees it as yours:\n\n${text}`);
@@ -524,7 +524,7 @@ program
   .option("--keep-recent <tokens>", "How many recent tokens to keep uncompacted (default 20000)")
   .option("--json", "Print a machine-readable result")
   .action(async (options) => {
-    const { compactPiSession } = await import("../src/pi-compact.js");
+    const { compactPiSession } = await import("../src/pi/compact.js");
     const config = load();
     const topic = findTopicByName(config, options.topic);
     if (!topic) throwCli(`unknown topic mapping: ${options.topic}`);

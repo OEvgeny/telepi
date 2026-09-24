@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { createCompactionCheckpoint, hasMeaningfulEntriesAfterLatestCompaction } from "../src/pi-compact.js";
-import { resolvePiPackageIndex } from "../src/pi-path.js";
+import { createCompactionCheckpoint, hasMeaningfulEntriesAfterLatestCompaction } from "../src/pi/compact.js";
+import { resolvePiPackageIndex } from "../src/pi/path.js";
 
 const pi = await import(pathToFileURL(resolvePiPackageIndex()).href);
 

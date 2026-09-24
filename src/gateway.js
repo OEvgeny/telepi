@@ -5,12 +5,12 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { readConfig, findTopicByName } from "./config.js";
-import { createTelegramAdapter } from "./telegram-adapter.js";
-import { parseCompactCommand } from "./pi-compact.js";
+import { createTelegramAdapter } from "./telegram/adapter.js";
+import { parseCompactCommand } from "./pi/compact.js";
 import { normalizeBrokerSubmitRequest, resolveBrokerTarget, createBrokerEnvelope } from "./broker-message.js";
 import { resolveBrokerSocketPath, startBrokerIpcServer } from "./broker-ipc.js";
 import { normalizePromptInboxInterval, startPromptInboxPolling } from "./prompt-inbox.js";
-import { startPiForTopic } from "./pi-cli-driver.js";
+import { startPiForTopic } from "./pi/cli-driver.js";
 import { installTimestampedConsole } from "./logging.js";
 
 installTimestampedConsole();

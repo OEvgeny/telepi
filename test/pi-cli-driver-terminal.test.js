@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { summarizeTranscriptLifecycle } from "../src/pi-cli-driver.js";
+import { summarizeTranscriptLifecycle } from "../src/pi/cli-driver.js";
 
 const message = (role, content, stopReason) => ({
   type: "message",

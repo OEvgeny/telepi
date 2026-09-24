@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { buildPiRunSpec } from "../src/pi-cli-driver.js";
-import { hydrateEnvelopeMedia, updateToEnvelope } from "../src/telegram.js";
+import { buildPiRunSpec } from "../src/pi/cli-driver.js";
+import { hydrateEnvelopeMedia, updateToEnvelope } from "../src/telegram/client.js";
 
 function telegramUpdate(media) {
   return {

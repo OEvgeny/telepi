@@ -1,4 +1,4 @@
-import { convert } from "../vendor/telegram-markdown-v2/index.js";
+import { convert } from "../../vendor/telegram-markdown-v2/index.js";
 
 const TELEGRAM_TEXT_LIMIT = 4096;
 

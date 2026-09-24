@@ -1,13 +1,13 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { findTopic, getBotToken } from "./config.js";
+import { findTopic, getBotToken } from "../config.js";
 import {
   TelegramClient,
   attributeBotReplyToAgent,
   hydrateEnvelopeMedia,
   updateToEnvelope,
-} from "./telegram.js";
-import { blockquoteEntities, italicEntities, toTelegramMarkdownV2 } from "./telegram-format.js";
+} from "./client.js";
+import { blockquoteEntities, italicEntities, toTelegramMarkdownV2 } from "./format.js";
 
 // Concrete in-process Telegram orchestration for the gateway. This module is
 // intentionally not a generalized transport interface; its methods follow the
