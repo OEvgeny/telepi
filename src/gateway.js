@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 import { readConfig, getBotToken, findTopic, findTopicByName } from "./config.js";
 import { TelegramClient, attributeBotReplyToAgent, hydrateEnvelopeMedia, updateToEnvelope } from "./telegram.js";
 import { parseCompactCommand } from "./pi-compact.js";
+import { normalizeBrokerSubmitRequest, resolveBrokerTarget, createBrokerEnvelope } from "./broker-message.js";
+import { resolveBrokerSocketPath, startBrokerIpcServer } from "./broker-ipc.js";
 import { normalizePromptInboxInterval, startPromptInboxPolling } from "./prompt-inbox.js";
 import { startPiForTopic } from "./pi-session.js";
 import { blockquoteEntities, italicEntities, toTelegramMarkdownV2 } from "./telegram-format.js";
@@ -47,6 +49,7 @@ async function main() {
   let offset = Number(process.env.TELEPI_UPDATE_OFFSET || 0) || undefined;
   const inFlight = new Map();
   initPendingQueuePersistence(config, inFlight);
+  await startBrokerApi(() => config, telegram, inFlight);
   startConfiguredPromptInbox(() => config, telegram, inFlight);
   let pollFailures = 0;
 
@@ -116,14 +119,9 @@ async function main() {
         continue;
       }
       rememberRetryPrompt(envelope);
-      if (active) {
-        steerRunningTopic(configForMessage, telegram, inFlight, topic, envelope, active).catch((error) => {
-          console.error(`steering dispatch failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
-        });
-        continue;
-      }
-
-      dispatchTopicRun(configForMessage, telegram, inFlight, topic, envelope);
+      submitTopicEnvelope(configForMessage, telegram, inFlight, topic, envelope).catch((error) => {
+        console.error(`message submission failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
+      });
     }
   }
 }
@@ -237,6 +235,67 @@ function startConfiguredPromptInbox(getConfig, telegram, inFlight) {
       return true;
     },
   });
+}
+
+async function startBrokerApi(getConfig, telegram, inFlight) {
+  const initialConfig = getConfig();
+  const socketPath = resolveBrokerSocketPath(initialConfig);
+  const submissions = new Map();
+  await startBrokerIpcServer({
+    socketPath,
+    onRequest: async (value) => {
+      const request = normalizeBrokerSubmitRequest(value);
+      const signature = JSON.stringify(request);
+      const existing = submissions.get(request.id);
+      if (existing) {
+        if (existing.signature !== signature) throw new Error(`Broker message id was reused with different content: ${request.id}`);
+        return existing.promise;
+      }
+
+      const promise = handleBrokerSubmission(getConfig(), telegram, inFlight, request);
+      submissions.set(request.id, { signature, promise });
+      while (submissions.size > 4096) submissions.delete(submissions.keys().next().value);
+      try {
+        return await promise;
+      } catch (error) {
+        if (submissions.get(request.id)?.promise === promise) submissions.delete(request.id);
+        throw error;
+      }
+    },
+  });
+  console.error(`telepi broker listening socket=${socketPath}`);
+}
+
+async function handleBrokerSubmission(config, telegram, inFlight, request) {
+  const topic = resolveBrokerTarget(config, request.target);
+  let telegramMessageId = "";
+
+  if (request.options.echo) {
+    const sentMessages = await sendLongMessage(telegram, {
+      chatId: topic.chat_id,
+      topicId: topic.topic_id,
+      text: request.message.text,
+    });
+    telegramMessageId = sentMessages[0]?.message_id == null
+      ? ""
+      : String(sentMessages[0].message_id);
+  }
+
+  const envelope = createBrokerEnvelope(topic, request, { telegramMessageId });
+  const status = await submitTopicEnvelope(config, telegram, inFlight, topic, envelope);
+  console.error(
+    `broker accepted id=${request.id} target=${JSON.stringify(topic.name)} agent=${topic.agent} `
+    + `origin=${request.origin.kind}:${JSON.stringify(request.origin.name)} status=${status}`,
+  );
+  return {
+    accepted: true,
+    id: request.id,
+    status,
+    topic: topic.name,
+    agent: topic.agent,
+    sessionId: topic.session_id,
+    telegramMessageId: telegramMessageId || null,
+  };
 }
 
 async function configureBotCommands(telegram, config) {
@@ -470,6 +529,14 @@ function startTopicMessage(config, telegram, topic, envelope) {
   return run;
 }
 
+async function submitTopicEnvelope(config, telegram, inFlight, topic, envelope) {
+  const key = `${envelope.chatId}:${envelope.topicId}`;
+  const active = inFlight.get(key);
+  if (active) return steerRunningTopic(config, telegram, inFlight, topic, envelope, active);
+  dispatchTopicRun(config, telegram, inFlight, topic, envelope);
+  return "started";
+}
+
 function dispatchTopicRun(config, telegram, inFlight, topic, envelope, pending = []) {
   const key = `${envelope.chatId}:${envelope.topicId}`;
   const run = startTopicMessage(config, telegram, topic, envelope);
@@ -553,7 +620,7 @@ async function steerRunningTopic(config, telegram, inFlight, topic, envelope, ac
     }).catch((error) => {
       console.error(`busy compact response failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.message}`);
     });
-    return;
+    return "rejected";
   }
 
   const hydratedEnvelope = await hydrateEnvelopeMedia(telegram, config, envelope).catch((error) => {
@@ -574,9 +641,11 @@ async function steerRunningTopic(config, telegram, inFlight, topic, envelope, ac
       throw error;
     }
     console.error(`steered chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${envelope.messageId}`);
+    return "steered";
   } catch (error) {
     console.error(`steering unavailable chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.message}`);
     await queueEnvelopeForRun(config, telegram, inFlight, topic, active, hydratedEnvelope);
+    return "queued";
   }
 }
 

@@ -97,11 +97,13 @@ Send a direct Telegram message to a topic without invoking pi or the gateway:
 npm run telepi -- topic:send --topic Helper --text "..." [--reply-to <message-id>] [--quote]
 ```
 
-Send a prompt into a topic from the command line (used by timers and scripts):
+Submit a prompt into the running gateway broker from the command line (used by agents, timers, and scripts):
 
 ```bash
 npm run telepi -- topic:prompt --topic Helper --text "..." [--no-echo] [--from "Name"] [--source "provenance"]
 ```
+
+`topic:prompt` returns after the broker accepts the message. The broker is the sole owner of per-topic dispatch: it starts an idle session, steers a running session, or queues the message for a safe boundary. Pi sessions also receive a `telepi_send_message` tool that submits one-way messages to the same broker by mapped topic name or uniquely mapped agent id.
 
 The gateway also owns a few Telegram slash commands directly:
 

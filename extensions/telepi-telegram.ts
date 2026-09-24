@@ -4,6 +4,7 @@ import { basename, dirname, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { BROKER_PROTOCOL_VERSION, requestBroker } from "../src/broker-ipc.js";
 
 type ButtonInput = string | { label: string; data?: string; url?: string };
 type Button = { label: string; data?: string; url?: string };
@@ -112,6 +113,51 @@ function layoutRows(buttons: Button[]): Button[][] {
 }
 
 export default function (pi: ExtensionAPI) {
+	pi.registerTool({
+		name: "telepi_send_message",
+		label: "Telepi Send Message",
+		description:
+			"Send a one-way text message to another mapped Telepi topic or uniquely mapped agent through the local broker. The broker starts an idle target, steers a running target, or queues the message at a safe boundary.",
+		promptSnippet:
+			"Send a message to another Telepi agent or topic through the local broker",
+		promptGuidelines: [
+			"Use telepi_send_message when the user asks you to contact or wake another Telepi agent.",
+			"telepi_send_message only confirms broker acceptance; it does not wait for the recipient's reply.",
+		],
+		parameters: Type.Object({
+			to: Type.String({ description: "Exact mapped topic name, or an agent id that has exactly one enabled topic." }),
+			message: Type.String({ description: "Text to deliver to the target session." }),
+		}),
+		async execute(toolCallId, params, signal) {
+			const socketPath = process.env.TELEPI_BROKER_SOCKET;
+			if (!socketPath) throw new Error("TELEPI_BROKER_SOCKET is not configured for this session");
+			const agentId = process.env.TELEPI_AGENT_ID || "unknown-agent";
+			const topicName = process.env.TELEPI_TOPIC_NAME || "";
+			const result = await requestBroker(socketPath, {
+				version: BROKER_PROTOCOL_VERSION,
+				type: "submit",
+				id: `${agentId}:${toolCallId}`,
+				target: { name: params.to },
+				message: { text: params.message },
+				origin: {
+					kind: "agent",
+					name: topicName || agentId,
+					agentId,
+					topicName: topicName || undefined,
+					source: `agent:${agentId}`,
+				},
+				options: { echo: false },
+			}, { signal });
+			return {
+				content: [{
+					type: "text",
+					text: `Message accepted for ${result.topic} (${result.agent}); status: ${result.status}.`,
+				}],
+				details: result,
+			};
+		},
+	});
+
 	pi.registerTool({
 		name: "telepi_send_image",
 		label: "Telepi Send Image",

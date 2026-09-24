@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import {
@@ -14,7 +15,8 @@ import {
 } from "../src/config.js";
 import { TelegramClient, normalizeTopicColor, resolveForumTopicIcon } from "../src/telegram.js";
 import { blockquoteEntities, toTelegramMarkdownV2 } from "../src/telegram-format.js";
-import { buildPiRunSpec, startPiForTopic } from "../src/pi-session.js";
+import { BROKER_PROTOCOL_VERSION, requestBroker, resolveBrokerSocketPath } from "../src/broker-ipc.js";
+import { buildPiRunSpec } from "../src/pi-session.js";
 
 const program = new Command();
 
@@ -429,12 +431,12 @@ program
 
 program
   .command("topic:prompt")
-  .description("Prompt a mapped topic's pi agent and send the response to Telegram")
+  .description("Submit a prompt to a mapped topic through the running Telepi broker")
   .option("--topic <name>", "Existing topic mapping name")
   .option("--agent <id>", "Configured agent id; allowed only when it has exactly one enabled topic")
   .option("--text <text>", "Prompt text")
   .option("--stdin", "Read prompt text from stdin")
-  .option("--no-echo", "Do not post the prompt into Telegram before running pi")
+  .option("--no-echo", "Do not post the prompt into Telegram before broker delivery")
   .option("--from <name>", "Sender name the agent sees in the routing header; defaults to the topic owner")
   .option("--source <text>", "Source/provenance line the agent sees in the routing header")
   .action(async (options) => {
@@ -444,92 +446,23 @@ program
     const text = promptText(options);
     if (!text.trim()) throwCli("missing --text or non-empty --stdin");
 
-    const telegram = new TelegramClient(getBotToken(config));
-    let promptMessageId = "";
-    if (options.echo) {
-      const sentMessages = await sendCliLongMessage(telegram, {
-        chatId: topic.chat_id,
-        topicId: topic.topic_id,
-        text,
-      });
-      promptMessageId = sentMessages[0]?.message_id == null ? "" : String(sentMessages[0].message_id);
-      console.log(`sent prompt to ${topic.name}: message=${promptMessageId}`);
-    }
-
     const owner = options.from ? null : resolveUser(config, topic.owner);
-    const envelope = {
-      updateId: `cli:${Date.now()}`,
-      chatId: String(topic.chat_id),
-      topicId: topic.topic_id == null ? null : String(topic.topic_id),
-      userId: owner?.id || "telepi-cli",
-      userName: options.from || owner?.alias || "telepi-cli",
-      messageId: promptMessageId,
-      source: options.source || "",
-      text,
-      attachments: [],
-    };
-
-    let delivered = 0;
-    let toolDeliveries = 0;
-    let lastModelError;
-    const countToolDelivery = (event) => {
-      if (cliIsTelegramDeliveryEvent(event)) toolDeliveries += 1;
-      if (event?.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason === "error") {
-        lastModelError = String(event.message.errorMessage || "unknown model error");
-      }
-    };
-    const displayBridge = createCliDisplayBridge(config, telegram, topic, envelope);
-    const run = await startPiForTopic(config, topic, envelope, displayBridge ? {
-      onEvent: (event) => {
-        countToolDelivery(event);
-        displayBridge.onEvent(event);
+    const request = {
+      version: BROKER_PROTOCOL_VERSION,
+      type: "submit",
+      id: `cli:${randomUUID()}`,
+      target: { topic: topic.name },
+      message: { text },
+      origin: {
+        kind: "cli",
+        name: options.from || owner?.alias || "telepi-cli",
+        source: options.source || undefined,
       },
-    } : {
-      onEvent: countToolDelivery,
-      onText: async (chunk) => {
-        const sentMessages = await sendCliLongMessage(telegram, {
-          chatId: topic.chat_id,
-          topicId: topic.topic_id,
-          replyToMessageId: promptMessageId || undefined,
-          text: chunk,
-        });
-        delivered += sentMessages.length;
-      },
-    });
-    const result = await run.promise;
-    if (displayBridge) {
-      await displayBridge.flush();
-      delivered += displayBridge.deliveredCount();
-    }
-    if (!result.ok) {
-      await sendCliLongMessage(telegram, {
-        chatId: topic.chat_id,
-        topicId: topic.topic_id,
-        replyToMessageId: promptMessageId || undefined,
-        text: `pi session failed (${result.code})\n\n${result.stderr || result.stdout || "No output"}`,
-        quote: true,
-      });
-      process.exitCode = 1;
-      return;
-    }
-    if (lastModelError) {
-      await sendCliLongMessage(telegram, {
-        chatId: topic.chat_id,
-        topicId: topic.topic_id,
-        replyToMessageId: promptMessageId || undefined,
-        text: `⚠️ ${topic.agent} hit a model error: ${lastModelError}`,
-        quote: true,
-      });
-    } else if (!delivered && !toolDeliveries) {
-      await sendCliLongMessage(telegram, {
-        chatId: topic.chat_id,
-        topicId: topic.topic_id,
-        replyToMessageId: promptMessageId || undefined,
-        text: result.stdout || `${topic.agent} completed without output.`,
-        quote: !result.stdout,
-      });
-    }
-    console.log(`completed ${topic.name} -> ${topic.agent}/${topic.session_id}`);
+      options: { echo: options.echo },
+    };
+    const result = await requestBroker(resolveBrokerSocketPath(config), request);
+    const telegram = result.telegramMessageId ? ` telegram_message=${result.telegramMessageId}` : "";
+    console.log(`accepted ${result.topic} -> ${result.agent}/${result.sessionId} status=${result.status}${telegram}`);
   });
 
 program
@@ -917,107 +850,6 @@ function promptText(options) {
   if (options.stdin && options.text) throwCli("use either --text or --stdin, not both");
   if (options.stdin) return readFileSync(0, "utf8");
   return options.text || "";
-}
-
-function createCliDisplayBridge(config, telegram, topic, envelope) {
-  const configured = topic.display_messages || config.agents?.[topic.agent]?.display_messages || config.telegram.display_messages;
-  if (!configured) return null;
-  const allowed = configured.map((value) => String(value).trim()).filter(Boolean);
-  const isAllowed = (type) => allowed.includes(type) || allowed.includes(type.split("/")[0]);
-  const toolMessages = new Map();
-  let queue = Promise.resolve();
-  let delivered = 0;
-
-  const deliver = async (item) => {
-    const existing = item.toolCallId ? toolMessages.get(item.toolCallId) : undefined;
-    if (existing) {
-      if (existing.text === item.text) return;
-      existing.text = item.text;
-      const converted = toTelegramMarkdownV2(item.text);
-      const payload = {
-        chatId: existing.chatId,
-        messageId: existing.messageId,
-        text: converted ?? item.text,
-        parseMode: converted ? "MarkdownV2" : undefined,
-      };
-      try {
-        await telegram.editMessageText(payload);
-      } catch (error) {
-        if (payload.parseMode && /parse entities|can't parse entities|reserved and must be escaped/i.test(error.message)) {
-          await telegram.editMessageText({ ...payload, parseMode: undefined, text: item.text });
-        } else {
-          throw error;
-        }
-      }
-      return;
-    }
-    const sent = await sendCliLongMessage(telegram, {
-      chatId: topic.chat_id,
-      topicId: topic.topic_id,
-      replyToMessageId: envelope.messageId || undefined,
-      text: item.text,
-    });
-    delivered += sent.length;
-    const latest = sent.at(-1);
-    if (item.toolCallId && latest?.message_id) {
-      toolMessages.set(item.toolCallId, { chatId: String(topic.chat_id), messageId: String(latest.message_id), text: item.text });
-    }
-  };
-
-  return {
-    onEvent: (event) => {
-      const item = cliDisplayItemFromEvent(event);
-      if (!item || !isAllowed(item.type)) return;
-      queue = queue
-        .catch(() => undefined)
-        .then(() => deliver(item))
-        .catch((error) => console.error(`display message failed: ${error.message}`));
-    },
-    flush: () => queue.catch(() => undefined),
-    deliveredCount: () => delivered,
-  };
-}
-
-function cliDisplayItemFromEvent(event) {
-  if (event?.type === "message_update" && event.assistantMessageEvent?.type === "text_end") {
-    const text = String(event.assistantMessageEvent.content || "").trim();
-    return text ? { type: "assistant/message", text } : null;
-  }
-  if (event?.type === "message_end" && event.message?.role === "custom" && event.message.display !== false) {
-    const customType = String(event.message.customType || "message");
-    const text = cliTextFromContent(event.message.content);
-    return text ? { type: `custom/${customType}`, text: cliTitledText(event.message, text) } : null;
-  }
-  const result = event?.type === "tool_execution_update"
-    ? event.partialResult
-    : event?.type === "tool_execution_end" ? event.result : null;
-  const customType = result?.details?.customType;
-  if (customType) {
-    const text = cliTextFromContent(result.content);
-    return text
-      ? { type: `custom/${customType}`, text: cliTitledText(result, text), toolCallId: event.toolCallId }
-      : null;
-  }
-  return null;
-}
-
-function cliIsTelegramDeliveryEvent(event) {
-  if (event?.type !== "tool_execution_end") return false;
-  const details = event.result?.details;
-  if (!details || typeof details !== "object") return false;
-  if (details.message_id) return true;
-  return Array.isArray(details.telegram_messages) && details.telegram_messages.some((entry) => entry?.messageId || entry?.message_id);
-}
-
-function cliTextFromContent(content) {
-  if (typeof content === "string") return content.trim();
-  if (!Array.isArray(content)) return "";
-  return content.map((part) => (part && typeof part === "object" && part.text) || "").filter(Boolean).join("\n").trim();
-}
-
-function cliTitledText(message, text) {
-  const title = message?.details?.telepiTitle || message?.details?.title || message?.telepiTitle || "";
-  return title ? `${title}\n${text}` : text;
 }
 
 function formatPiShellCommand(config, spec, includePrompt) {

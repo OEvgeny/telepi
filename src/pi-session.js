@@ -2,6 +2,7 @@ import { closeSync, mkdirSync, openSync, readSync, readdirSync, statSync } from 
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getAgent, getBotToken, resolveEntityDir, resolvePath, resolveTopicModel } from "./config.js";
+import { resolveBrokerSocketPath } from "./broker-ipc.js";
 import { prependExecutableDirToPath, resolvePiCliPath, resolvePiPackageIndex } from "./pi-path.js";
 
 export async function runPiForTopic(config, topic, envelope, options = {}) {
@@ -75,6 +76,7 @@ export function buildPiRunSpec(config, topic, envelope, options = {}) {
       TELEPI_USER_MESSAGE: envelope.text || "",
       TELEPI_BOT_TOKEN: options.botToken ?? getBotToken(config),
       TELEPI_BUTTON_STORE: resolvePath(config.project.cache_dir, "button-callbacks.jsonl"),
+      TELEPI_BROKER_SOCKET: resolveBrokerSocketPath(config),
     },
     initialMessage: formatTelegramMessage(topic, withAliasName(config, envelope)),
     // Silence is not proof of a stalled run: a tool or provider request can work
@@ -96,10 +98,26 @@ function withAliasName(config, envelope) {
 }
 
 function formatTelegramMessage(topic, envelope) {
-  const userText = envelope.text || "[Telegram message contained attachment(s) without text.]";
+  const userText = envelope.text || (envelope.transport === "telepi"
+    ? "[Telepi broker message contained no text.]"
+    : "[Telegram message contained attachment(s) without text.]");
   const isSkillDirective = /^\/skill:\S/.test(userText);
 
-  const routing = [
+  const routing = envelope.transport === "telepi"
+    ? formatBrokerRouting(topic, envelope)
+    : formatTelegramRouting(topic, envelope);
+
+  // /skill:<name> directives must be at the very start of the message for pi to expand them.
+  // When a skill directive is present, put it first, then append routing context.
+  if (isSkillDirective) {
+    return `${userText}\n\n${routing.join("\n")}`;
+  }
+
+  return `${routing.join("\n")}\n\n${userText}`;
+}
+
+function formatTelegramRouting(topic, envelope) {
+  return [
     `Telegram topic route: ${topic.name}`,
     `local_time=${formatLocalTime(new Date())}`,
     `chat_id=${envelope.chatId}`,
@@ -117,14 +135,27 @@ function formatTelegramMessage(topic, envelope) {
       ]
       : []),
   ];
+}
 
-  // /skill:<name> directives must be at the very start of the message for pi to expand them.
-  // When a skill directive is present, put it first, then append routing context.
-  if (isSkillDirective) {
-    return `${userText}\n\n${routing.join("\n")}`;
-  }
-
-  return `${routing.join("\n")}\n\n${userText}`;
+function formatBrokerRouting(topic, envelope) {
+  const origin = envelope.origin || {};
+  return [
+    `Telepi broker route: ${topic.name}`,
+    `local_time=${formatLocalTime(new Date())}`,
+    `telepi_message_id=${envelope.brokerMessageId || envelope.updateId || "unknown"}`,
+    `telepi_sender_kind=${origin.kind || "unknown"}`,
+    `telepi_sender_name=${origin.name || envelope.userName || "unknown"}`,
+    ...(origin.agentId ? [`telepi_sender_agent_id=${origin.agentId}`] : []),
+    ...(origin.topicName ? [`telepi_sender_topic=${origin.topicName}`] : []),
+    ...(envelope.source ? [`telepi_message_source=${envelope.source}`] : []),
+    ...(envelope.attachments?.length
+      ? [
+        "",
+        "Attachments (use transcribe_file for audio/video; use read for supported image/text content):",
+        ...envelope.attachments.map(formatAttachment),
+      ]
+      : []),
+  ];
 }
 
 // Models have no clock; anything time-aware (scheduling, "how long since",
