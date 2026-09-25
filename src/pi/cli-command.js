@@ -30,5 +30,11 @@ export function buildPiCliSpec(config, topic, envelope, options = {}) {
 
   const model = resolveTopicModel(config, topic, base.agent);
   if (model) args.push("--model", model);
-  return { ...base, args };
+  return {
+    ...base,
+    args,
+    env: base.location
+      ? { ...base.env, PI_CODING_AGENT_DIR: base.entityDir }
+      : base.env,
+  };
 }

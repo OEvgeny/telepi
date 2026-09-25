@@ -21,9 +21,20 @@ The runtime combines:
 - agent-specific skills and extensions;
 - project-wide extensions;
 - the topic model override, or the agent's main-topic model;
-- Pi's normal host credential and model stores.
+- host-owned credential and model stores supplied explicitly through Pi's SDK.
 
-The worker currently uses the entity folder as Pi's cwd, preserving project-local context such as the entity's `AGENTS.md`. Pi's SDK remains inside the fresh worker rather than the long-running gateway, so Pi upgrades cannot leave a stale model/runtime catalog cached in the service process.
+New topic mappings use a location-aware session:
+
+```yaml
+session:
+  id: helper-main
+  location:
+    cwd: entities/helper
+```
+
+For these sessions, the entity root is Pi's agent home and `session.location.cwd` is the project working directory. Stable identity and agent-wide instructions belong in `<entity-root>/AGENTS.md`; other agent-home resources use Pi's normal layout directly under that root (`settings.json`, `extensions/`, `skills/`). A different location may provide its own project `AGENTS.md` and `.pi/` resources. Host-global Pi settings and resources are omitted, while shared `auth.json`, `models.json`, and `models-store.json` remain infrastructure. Existing mappings with only `session_id` stay in legacy mode for backward compatibility.
+
+Pi's SDK remains inside the fresh worker rather than the long-running gateway, so Pi upgrades cannot leave a stale model/runtime catalog cached in the service process.
 
 ## Commands
 
@@ -49,13 +60,13 @@ Telegram topic icons are not arbitrary emoji. They must be one of Telegram's for
 Create and bind an additional Telegram topic:
 
 ```bash
-npm run telepi -- topic:create --chat-id <chat_id> --name Helper --agent helper
+npm run telepi -- topic:create --chat-id <chat_id> --name Helper --agent helper [--cwd <path>]
 ```
 
 Bind an existing topic:
 
 ```bash
-npm run telepi -- topic:bind --chat-id <chat_id> --topic-id <topic_id> --name Helper --agent helper
+npm run telepi -- topic:bind --chat-id <chat_id> --topic-id <topic_id> --name Helper --agent helper [--cwd <path>]
 ```
 
 Set a per-topic model (the agent's main topic acts as the default for its other topics). Append a pi thinking level to configure effort for both normal turns and compaction:
@@ -75,7 +86,7 @@ npm run telepi -- session:unlink --name Helper --reason "fresh conversation"
 npm run telepi -- session:restore --name Helper --session-id helper-1001
 ```
 
-`session:unlink` changes only the topic mapping's active `session_id`; the old `.telepi/pi-sessions/*.jsonl` files are preserved and recorded under `sessions.unlinked` in `config/telepi.yaml`.
+`session:unlink` changes only the topic mapping's active session id; the old `.telepi/pi-sessions/*.jsonl` files are preserved and recorded under `sessions.unlinked` in `config/telepi.yaml`.
 
 Compact a long-running session:
 

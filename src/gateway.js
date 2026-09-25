@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
-import { readConfig, findTopicByName } from "./config.js";
+import { readConfig, findTopicByName, resolveTopicSession, setTopicSessionId } from "./config.js";
 import { createTelegramAdapter } from "./telegram/adapter.js";
 import { parseCompactCommand } from "./pi/compact.js";
 import { normalizeBrokerSubmitRequest, resolveBrokerTarget, createBrokerEnvelope } from "./broker-message.js";
@@ -183,7 +183,7 @@ async function handleBrokerSubmission(config, telegram, inFlight, request) {
     status,
     topic: topic.name,
     agent: topic.agent,
-    sessionId: topic.session_id,
+    sessionId: resolveTopicSession(config, topic).id,
     telegramMessageId: telegramMessageId || null,
   };
 }
@@ -301,7 +301,7 @@ function startTopicMessage(config, telegram, topic, envelope) {
     topic: {
       name: topic.name,
       agent: topic.agent,
-      sessionId: topic.session_id,
+      sessionId: resolveTopicSession(config, topic).id,
     },
     envelope: serializeQueueEnvelope(envelope),
     startedAt: new Date().toISOString(),
@@ -497,7 +497,7 @@ function compactTimestamp(date) {
 }
 
 async function handleTopicMessage(config, telegram, topic, envelope, active) {
-  console.error(`routing chat=${envelope.chatId} topic=${envelope.topicId} to ${topic.agent}/${topic.session_id}`);
+  console.error(`routing chat=${envelope.chatId} topic=${envelope.topicId} to ${topic.agent}/${resolveTopicSession(config, topic).id}`);
   const compactInstructions = parseCompactCommand(envelope.text);
   if (compactInstructions !== null) {
     active.acceptsSteering = false;
@@ -552,7 +552,7 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
     const newSessionId = freshSessionIdForTopic(topic);
     const recovered = await unlinkTopicSessionWithCli(topic, newSessionId).catch((error) => ({ ok: false, error }));
     if (recovered.ok) {
-      topic.session_id = newSessionId;
+      setTopicSessionId(topic, newSessionId);
       active.recoveredPromptTimeout = true;
       active.pending.unshift({ ...envelope, source: AUTO_RETRY_SOURCE });
       console.error(`recovered rpc prompt timeout chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} new_session=${newSessionId}; retrying message=${envelope.messageId}`);
@@ -658,7 +658,7 @@ async function handleCompactCommand(config, telegram, topic, envelope, instructi
       });
       return;
     }
-    if (outcome.checkpoint?.sessionId) topic.session_id = outcome.checkpoint.sessionId;
+    if (outcome.checkpoint?.sessionId) setTopicSessionId(topic, outcome.checkpoint.sessionId);
     console.error(`compacted chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} duration=${durationSeconds}s checkpoint=${outcome.checkpoint?.sessionId || "none"}`);
     const checkpointText = outcome.checkpoint
       ? `\nCheckpoint session: ${outcome.checkpoint.sessionId}\nTranscript bytes: ${outcome.checkpoint.sourceBytes} → ${outcome.checkpoint.checkpointBytes}`

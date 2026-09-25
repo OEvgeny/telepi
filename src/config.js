@@ -167,6 +167,55 @@ export function resolveEntityDir(config, agent) {
   return resolvePath(config.project.root, entityDir);
 }
 
+export function resolveTopicSession(config, topic, options = {}) {
+  const agent = options.agent || getAgent(config, topic.agent);
+  const entityDir = resolveEntityDir(config, agent);
+  const nested = topic.session;
+  if (nested != null && (typeof nested !== "object" || Array.isArray(nested))) {
+    throw new Error(`Invalid session config for ${topic.name}: expected an object`);
+  }
+  const id = String(
+    options.sessionId
+      || nested?.id
+      || topic.session_id
+      || agent.session_id
+      || `${topic.agent}-${topic.topic_id}`,
+  );
+  const configuredLocation = nested?.location;
+  if (configuredLocation == null) {
+    return { id, cwd: entityDir, entityDir, location: null };
+  }
+  if (typeof configuredLocation === "string") {
+    throw new Error(`Named session locations are not supported yet: ${configuredLocation}`);
+  }
+  if (typeof configuredLocation !== "object" || Array.isArray(configuredLocation)) {
+    throw new Error(`Invalid session location for ${topic.name}: expected an object`);
+  }
+  const configuredCwd = String(configuredLocation.cwd || "").trim();
+  if (!configuredCwd) throw new Error(`Session location for ${topic.name} is missing cwd`);
+  return {
+    id,
+    cwd: resolvePath(config.project.root, configuredCwd),
+    entityDir,
+    location: { ...configuredLocation, cwd: configuredCwd },
+  };
+}
+
+export function createTopicSessionConfig(id, cwd) {
+  return {
+    id: String(id),
+    location: { cwd: String(cwd) },
+  };
+}
+
+export function setTopicSessionId(topic, id) {
+  if (topic.session && typeof topic.session === "object" && !Array.isArray(topic.session)) {
+    topic.session.id = String(id);
+    return;
+  }
+  topic.session_id = String(id);
+}
+
 export function resolvePath(base, path) {
   return isAbsolute(path) ? normalize(path) : resolve(base, path);
 }

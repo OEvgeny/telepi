@@ -1,10 +1,15 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { getAgent, resolveEntityDir, resolvePath, resolveTopicModel } from "../config.js";
 import { resolvePiPackageIndex } from "./path.js";
+import {
+  buildTopicRuntimeSpec,
+  createInfrastructureModelRuntime,
+  findSessionHeaders,
+  resolveProjectTrust,
+} from "./runtime.js";
 
 let piModulePromise;
 
@@ -31,38 +36,44 @@ const COMPACTION_NOTICE =
   "that came from one.";
 
 export async function compactPiSession(config, topic, instructions, options = {}) {
-  const agent = getAgent(config, topic.agent);
-  const entityDir = resolveEntityDir(config, agent);
-  const sessionId = topic.session_id || agent.session_id || `${topic.agent}-${topic.topic_id}`;
-  const sessionFile = findSessionFile(config.project.sessions_dir, sessionId);
+  const pi = await loadPiModule();
+  const spec = buildTopicRuntimeSpec(config, topic, { infrastructureAgentDir: pi.getAgentDir() });
+  const sessionFile = findSessionFile(config.project.sessions_dir, spec.sessionId, spec.cwd);
   if (!sessionFile) {
-    throw new Error(`No session file found for ${topic.name} (${sessionId})`);
+    throw new Error(`No session file found for ${topic.name} (${spec.sessionId})`);
   }
 
-  const pi = await loadPiModule();
-  const sessionManager = pi.SessionManager.open(sessionFile, config.project.sessions_dir, entityDir);
+  const sessionManager = pi.SessionManager.open(sessionFile, config.project.sessions_dir, spec.cwd);
   if (!hasMeaningfulEntriesAfterLatestCompaction(sessionManager.getBranch())) {
     throw new Error("Already compacted");
   }
-  const modelSpec = options.model || resolveTopicModel(config, topic, agent);
-  const settingsManager = buildSettingsManager(pi.SettingsManager, entityDir, options.keepRecentTokens);
-  const configuredExtensions = [...new Set([
-    ...(config.project.extensions || []),
-    ...(agent.extensions || []),
-  ].map((extension) => resolvePath(config.project.root, extension)))];
-  const configuredSkills = (agent.skills || []).map((skill) => resolvePath(config.project.root, skill));
+  const modelSpec = options.model || spec.modelSpec;
+  const trustDiagnostics = [];
+  const projectTrusted = resolveProjectTrust(
+    pi,
+    spec.cwd,
+    spec.infrastructureAgentDir,
+    trustDiagnostics,
+  );
+  const trustError = trustDiagnostics.find((diagnostic) => diagnostic.type === "error");
+  if (trustError) throw new Error(trustError.message);
+  const settingsManager = buildSettingsManager(pi.SettingsManager, spec, projectTrusted, options.keepRecentTokens);
 
   let session;
   if (typeof pi.createAgentSessionServices === "function" && typeof pi.createAgentSessionFromServices === "function") {
-    // Load the same global packages and configured extensions as a normal pi run
-    // before resolving the model. Provider extensions register their models while
-    // services are created, so the resolver and session share one ModelRuntime.
+    // Load the same agent/location resources and configured extensions as a
+    // normal run before resolving the model. Provider extensions register their
+    // models while services are created, so both share one ModelRuntime.
+    const modelRuntime = await createInfrastructureModelRuntime(pi, spec.infrastructureAgentDir);
     const services = await pi.createAgentSessionServices({
-      cwd: entityDir,
+      cwd: spec.cwd,
+      agentDir: spec.agentDir,
       settingsManager,
+      modelRuntime,
       resourceLoaderOptions: {
-        additionalExtensionPaths: configuredExtensions,
-        additionalSkillPaths: configuredSkills,
+        additionalExtensionPaths: spec.extensionPaths,
+        additionalSkillPaths: spec.skillPaths,
+        appendSystemPrompt: spec.appendSystemPrompt,
       },
     });
     const resolvedModel = modelSpec
@@ -77,7 +88,7 @@ export async function compactPiSession(config, topic, instructions, options = {}
   } else {
     const resolvedModel = modelSpec ? await resolveCompactionModel(modelSpec) : {};
     ({ session } = await pi.createAgentSession({
-      cwd: entityDir,
+      cwd: spec.cwd,
       sessionManager,
       model: resolvedModel.model,
       modelRuntime: resolvedModel.modelRuntime,
@@ -104,7 +115,7 @@ export async function compactPiSession(config, topic, instructions, options = {}
           sessionManager,
           sourceFile: sessionFile,
           sessionsDir: config.project.sessions_dir,
-          entityDir,
+          entityDir: spec.cwd,
           sessionId: freshCheckpointSessionId(topic),
         })
       : null;
@@ -251,13 +262,11 @@ function freshEntryId(usedIds) {
 // Custom message entries participate in LLM context on the next run. If the
 // topic has no session file yet there is nothing to record into.
 export async function appendTopicSessionNote(config, topic, noteText) {
-  const agent = getAgent(config, topic.agent);
-  const entityDir = resolveEntityDir(config, agent);
-  const sessionId = topic.session_id || agent.session_id || `${topic.agent}-${topic.topic_id}`;
-  const sessionFile = findSessionFile(config.project.sessions_dir, sessionId);
+  const pi = await loadPiModule();
+  const spec = buildTopicRuntimeSpec(config, topic, { infrastructureAgentDir: pi.getAgentDir() });
+  const sessionFile = findSessionFile(config.project.sessions_dir, spec.sessionId, spec.cwd);
   if (!sessionFile) return false;
-  const { SessionManager } = await loadPiModule();
-  const sessionManager = SessionManager.open(sessionFile, config.project.sessions_dir, entityDir);
+  const sessionManager = pi.SessionManager.open(sessionFile, config.project.sessions_dir, spec.cwd);
   sessionManager.appendCustomMessageEntry("telepi-sent-as-you", [{ type: "text", text: noteText }], false);
   sessionManager.flush?.();
   return true;
@@ -269,14 +278,15 @@ export function parseCompactCommand(text) {
   return (match[1] || "").trim();
 }
 
-// The entity's own .pi/settings.json still applies; keepRecentTokens (how many
-// recent tokens survive compaction uncompacted) is layered on top when given.
-function buildSettingsManager(SettingsManager, entityDir, keepRecentTokens) {
-  if (!keepRecentTokens) return undefined;
-  const settingsManager = SettingsManager.create(entityDir);
-  settingsManager.applyOverrides({
-    compaction: { keepRecentTokens: Number(keepRecentTokens) },
-  });
+// Agent-home and location settings match a normal run; keepRecentTokens (how
+// many recent tokens survive compaction uncompacted) is layered on top.
+function buildSettingsManager(SettingsManager, spec, projectTrusted, keepRecentTokens) {
+  const settingsManager = SettingsManager.create(spec.cwd, spec.agentDir, { projectTrusted });
+  if (keepRecentTokens) {
+    settingsManager.applyOverrides({
+      compaction: { keepRecentTokens: Number(keepRecentTokens) },
+    });
+  }
   return settingsManager;
 }
 
@@ -309,14 +319,19 @@ export async function resolveCompactionModel(spec, options = {}) {
   };
 }
 
-function findSessionFile(sessionDir, sessionId) {
+function findSessionFile(sessionDir, sessionId, cwd) {
   if (!sessionId || !existsSync(sessionDir)) return null;
-  const suffix = `_${sessionId}.jsonl`;
-  const matches = readdirSync(sessionDir)
-    .filter((name) => name.endsWith(suffix))
-    .sort()
-    .map((name) => join(sessionDir, name));
-  return matches.at(-1) || null;
+  const expectedCwd = resolve(cwd);
+  const sessions = findSessionHeaders(sessionDir, sessionId);
+  const conflicting = sessions.find(({ header }) => resolve(header.cwd || "") !== expectedCwd);
+  if (conflicting) {
+    const actualCwd = conflicting.header.cwd ? resolve(conflicting.header.cwd) : "an unknown cwd";
+    throw new Error(
+      `Session ${sessionId} belongs to ${actualCwd}, not ${expectedCwd}; `
+      + "rotate the topic session before changing its location",
+    );
+  }
+  return sessions.filter(({ header }) => resolve(header.cwd || "") === expectedCwd).at(-1)?.path || null;
 }
 
 async function loadPiModule() {

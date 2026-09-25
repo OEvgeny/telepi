@@ -1,16 +1,18 @@
 import { mkdirSync } from "node:fs";
-import { getAgent, getBotToken, resolveEntityDir, resolvePath } from "../config.js";
+import { getAgent, getBotToken, resolvePath, resolveTopicSession } from "../config.js";
 import { resolveBrokerSocketPath } from "../broker-ipc.js";
 
 export function buildTopicRunSpec(config, topic, envelope, options = {}) {
   const agent = getAgent(config, topic.agent);
-  const entityDir = resolveEntityDir(config, agent);
-  const sessionId = options.sessionId || topic.session_id || agent.session_id || `${topic.agent}-${topic.topic_id}`;
-  mkdirSync(entityDir, { recursive: true });
+  const session = resolveTopicSession(config, topic, { agent, sessionId: options.sessionId });
+  mkdirSync(session.entityDir, { recursive: true });
+  mkdirSync(session.cwd, { recursive: true });
   mkdirSync(config.project.sessions_dir, { recursive: true });
 
   return {
-    cwd: entityDir,
+    cwd: session.cwd,
+    entityDir: session.entityDir,
+    location: session.location,
     env: {
       TELEPI_CHAT_ID: envelope.chatId,
       TELEPI_TOPIC_ID: envelope.topicId || "",
@@ -29,7 +31,7 @@ export function buildTopicRunSpec(config, topic, envelope, options = {}) {
     // opt into the legacy idle timeout or an explicit absolute hard limit.
     idleTimeoutMs: Number(agent.idle_timeout_ms ?? agent.timeout_ms ?? 0),
     hardTimeoutMs: Number(agent.hard_timeout_ms ?? 0),
-    sessionId: String(sessionId),
+    sessionId: session.id,
     agent,
   };
 }

@@ -20,7 +20,7 @@ export async function startRpcRun(args, {
   // Capture the pre-prompt byte boundary. Pi persists messages before all RPC
   // lifecycle events have necessarily escaped the process, so the transcript
   // is the authoritative fallback when RPC wedges after writing a final answer.
-  const transcriptCursor = createSessionTranscriptCursor(sessionDir, sessionId);
+  const transcriptCursor = createSessionTranscriptCursor(sessionDir, sessionId, cwd);
   if (typeof createRpcClient !== "function") throw new Error("RPC client factory is required");
   const client = createRpcClient({
     workerPath,
@@ -223,18 +223,19 @@ export async function startRpcRun(args, {
   };
 }
 
-function createSessionTranscriptCursor(sessionDir, sessionId) {
-  const path = findSessionTranscriptFile(sessionDir, sessionId);
+function createSessionTranscriptCursor(sessionDir, sessionId, cwd) {
+  const path = findSessionTranscriptFile(sessionDir, sessionId, cwd);
   return {
     sessionDir,
     sessionId: String(sessionId || ""),
+    cwd: resolve(cwd),
     path,
     offset: path ? statSync(path).size : 0,
     pending: Buffer.alloc(0),
   };
 }
 
-function findSessionTranscriptFile(sessionDir, sessionId) {
+function findSessionTranscriptFile(sessionDir, sessionId, cwd) {
   if (!sessionDir || !sessionId) return null;
   try {
     const candidates = readdirSync(sessionDir)
@@ -248,7 +249,11 @@ function findSessionTranscriptFile(sessionDir, sessionId) {
         const length = readSync(fd, buffer, 0, buffer.length, 0);
         const newline = buffer.indexOf(0x0a, 0);
         const header = parseJsonLine(buffer.subarray(0, newline >= 0 ? newline : length).toString("utf8"));
-        if (header?.type === "session" && String(header.id) === String(sessionId)) return path;
+        if (
+          header?.type === "session"
+          && String(header.id) === String(sessionId)
+          && resolve(header.cwd || "") === resolve(cwd)
+        ) return path;
       } finally {
         closeSync(fd);
       }
@@ -262,7 +267,7 @@ function findSessionTranscriptFile(sessionDir, sessionId) {
 function readSessionTranscriptEntries(cursor) {
   try {
     if (!cursor.path) {
-      cursor.path = findSessionTranscriptFile(cursor.sessionDir, cursor.sessionId);
+      cursor.path = findSessionTranscriptFile(cursor.sessionDir, cursor.sessionId, cursor.cwd);
       if (!cursor.path) return [];
       cursor.offset = 0;
     }

@@ -4,13 +4,16 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import {
+  createTopicSessionConfig,
   findTopicByName,
   getBotToken,
   readConfig,
   resolvePath,
+  resolveTopicSession,
   resolveUser,
   resolveConfigPath,
   serializableConfig,
+  setTopicSessionId,
   writeConfig,
 } from "../src/config.js";
 import { TelegramClient, normalizeTopicColor, resolveForumTopicIcon } from "../src/telegram/client.js";
@@ -55,7 +58,9 @@ program
     const config = load();
     for (const topic of config.topics) {
       const owner = topic.owner ? `\towner=${topic.owner}` : "";
-      console.log(`${topic.name}\tchat=${topic.chat_id}\ttopic=${topic.topic_id}\tagent=${topic.agent}\tsession=${topic.session_id}${owner}`);
+      const session = resolveTopicSession(config, topic);
+      const location = session.location ? `\tcwd=${session.location.cwd}` : "\tmode=legacy";
+      console.log(`${topic.name}\tchat=${topic.chat_id}\ttopic=${topic.topic_id}\tagent=${topic.agent}\tsession=${session.id}${location}${owner}`);
     }
   });
 
@@ -104,6 +109,7 @@ program
   .option("--chat-id <id>", "Telegram chat id for the seed topic; defaults to manager.chat_id")
   .option("--owner <alias-or-id>", "Topic owner alias/id; defaults to configured owner")
   .option("--topic-name <name>", "Seed topic name; defaults to the agent display name")
+  .option("--cwd <path>", "Seed topic working directory; defaults to the entity root")
   .option("--no-seed-topic", "Create only the entity/config entry, without a Telegram seed topic")
   .option("--color <color>", "Default Telegram topic color name or integer", "blue")
   .option("--style <style>", "Default free-form style metadata")
@@ -130,7 +136,11 @@ program
     mkdirSync(join(config.project.root, entityDir), { recursive: true });
     const agentsMd = join(config.project.root, entityDir, "AGENTS.md");
     if (!existsSync(agentsMd)) {
-      writeFileSync(agentsMd, `# ${agentName}\n\nThis folder is the stable entity state for the ${options.id} Telegram topic agent.\n`, "utf8");
+      writeFileSync(
+        agentsMd,
+        `# ${agentName}\n\nThis directory is the agent home for ${options.id}. Keep stable identity and agent-wide instructions in this AGENTS.md; location-specific instructions belong in the configured location cwd.\n`,
+        "utf8",
+      );
     }
     if (options.seedTopic) {
       const owner = resolveUser(config, options.owner);
@@ -142,6 +152,7 @@ program
         name: options.topicName || agentName,
         agentId: options.id,
         sessionId: options.sessionId || options.id,
+        cwd: options.cwd || entityDir,
         color: options.color,
         style: options.style,
         avatar: options.avatar,
@@ -233,6 +244,7 @@ program
   .requiredOption("--name <name>", "Topic name")
   .requiredOption("--agent <id>", "Configured agent id")
   .option("--session-id <id>", "Stable pi session id")
+  .option("--cwd <path>", "Session working directory; defaults to the entity root")
   .option("--color <color>", "Telegram topic icon color name or integer")
   .option("--style <style>", "Free-form style metadata")
   .option("--avatar <avatar>", "Free-form avatar metadata")
@@ -250,6 +262,7 @@ program
       name: options.name,
       agentId: options.agent,
       sessionId: options.sessionId,
+      cwd: options.cwd,
       color: options.color,
       style: options.style,
       avatar: options.avatar,
@@ -267,6 +280,7 @@ program
   .requiredOption("--name <name>", "Mapping name")
   .requiredOption("--agent <id>", "Configured agent id")
   .option("--session-id <id>", "Stable pi session id")
+  .option("--cwd <path>", "Session working directory; defaults to the entity root")
   .option("--style <style>", "Free-form style metadata")
   .option("--avatar <avatar>", "Free-form avatar metadata")
   .action((options) => {
@@ -280,7 +294,10 @@ program
       chat_id: String(options.chatId),
       topic_id: String(options.topicId),
       agent: options.agent,
-      session_id: options.sessionId || defaultSessionId(options.agent, agent, options.name, options.topicId),
+      session: createTopicSessionConfig(
+        options.sessionId || defaultSessionId(options.agent, agent, options.name, options.topicId),
+        options.cwd || agent.entity_dir || join("entities", options.agent),
+      ),
       enabled: true,
       style: options.style ?? agent.branding?.style ?? null,
       avatar: options.avatar ?? agent.branding?.avatar ?? null,
@@ -320,9 +337,9 @@ program
     if (!topic) throwCli(`unknown topic mapping: ${options.name}`);
     if (!config.agents[options.agent]) throwCli(`unknown agent: ${options.agent}`);
     topic.agent = options.agent;
-    if (options.sessionId) topic.session_id = options.sessionId;
+    if (options.sessionId) setTopicSessionId(topic, options.sessionId);
     save(config);
-    console.log(`updated ${topic.name} -> ${topic.agent}/${topic.session_id}`);
+    console.log(`updated ${topic.name} -> ${topic.agent}/${resolveTopicSession(config, topic).id}`);
   });
 
 program
@@ -477,9 +494,11 @@ program
     if (options.topic && !topics.length) throwCli(`unknown topic mapping: ${options.topic}`);
     if (!options.unlinked) {
       for (const topic of topics) {
-        console.log(`active\t${topic.name}\tchat=${topic.chat_id}\ttopic=${topic.topic_id}\tagent=${topic.agent}\tsession=${topic.session_id}`);
+        const session = resolveTopicSession(config, topic);
+        const location = session.location ? `\tcwd=${session.location.cwd}` : "\tmode=legacy";
+        console.log(`active\t${topic.name}\tchat=${topic.chat_id}\ttopic=${topic.topic_id}\tagent=${topic.agent}\tsession=${session.id}${location}`);
         if (options.files) {
-          for (const file of sessionFiles(config, topic.session_id)) {
+          for (const file of sessionFiles(config, session.id)) {
             console.log(`file\t${topic.name}\t${file.name}\t${file.size}`);
           }
         }
@@ -541,17 +560,17 @@ program
           console.log(JSON.stringify({
             status: "skipped",
             topic: topic.name,
-            sessionId: topic.session_id,
+            sessionId: resolveTopicSession(config, topic).id,
             reason: error.message,
           }));
         } else {
-          console.log(`skipped ${topic.name} (${topic.session_id}): ${error.message}`);
+          console.log(`skipped ${topic.name} (${resolveTopicSession(config, topic).id}): ${error.message}`);
         }
         return;
       }
       throw error;
     }
-    const sourceSessionId = topic.session_id;
+    const sourceSessionId = resolveTopicSession(config, topic).id;
     if (result?.checkpoint) {
       if (String(result.checkpoint.sourceSessionId) !== String(sourceSessionId)) {
         throw new Error(`checkpoint source session mismatch: ${result.checkpoint.sourceSessionId} != ${sourceSessionId}`);
@@ -566,14 +585,14 @@ program
         unlinked_at: new Date().toISOString(),
         reason: `compaction checkpoint at ${result.checkpoint.sourceBytes} bytes`,
       });
-      topic.session_id = String(result.checkpoint.sessionId);
+      setTopicSessionId(topic, result.checkpoint.sessionId);
       save(config);
     }
     if (options.json) {
       console.log(JSON.stringify({
         status: "compacted",
         topic: topic.name,
-        sessionId: topic.session_id,
+        sessionId: resolveTopicSession(config, topic).id,
         sourceSessionId,
         result: {
           firstKeptEntryId: result?.firstKeptEntryId,
@@ -590,7 +609,7 @@ program
       const checkpoint = result?.checkpoint
         ? `; checkpointed ${sourceSessionId} -> ${result.checkpoint.sessionId} (${formatByteSize(result.checkpoint.sourceBytes)} -> ${formatByteSize(result.checkpoint.checkpointBytes)})`
         : "";
-      console.log(`compacted ${topic.name} (${topic.session_id}): tokensBefore=${result?.tokensBefore ?? "?"}${checkpoint}`);
+      console.log(`compacted ${topic.name} (${resolveTopicSession(config, topic).id}): tokensBefore=${result?.tokensBefore ?? "?"}${checkpoint}`);
     }
   });
 
@@ -604,7 +623,7 @@ program
     const config = load();
     const topic = findTopicByName(config, options.name);
     if (!topic) throwCli(`unknown topic mapping: ${options.name}`);
-    const oldSessionId = topic.session_id;
+    const oldSessionId = resolveTopicSession(config, topic).id;
     const newSessionId = options.sessionId || freshSessionId(topic);
     if (String(oldSessionId) === String(newSessionId)) throwCli("new session id must differ from the current session id");
     config.sessions ||= {};
@@ -619,7 +638,7 @@ program
       unlinked_at: new Date().toISOString(),
       reason: options.reason || null,
     });
-    topic.session_id = String(newSessionId);
+    setTopicSessionId(topic, newSessionId);
     save(config);
     console.log(`unlinked ${topic.name}: ${oldSessionId} -> ${newSessionId}`);
   });
@@ -642,8 +661,8 @@ program
       sessionId = entries[index - 1].session_id;
     }
     if (!sessionId) throwCli("missing --session-id or --index");
-    const oldSessionId = topic.session_id;
-    topic.session_id = String(sessionId);
+    const oldSessionId = resolveTopicSession(config, topic).id;
+    setTopicSessionId(topic, sessionId);
     config.sessions ||= {};
     config.sessions.unlinked ||= [];
     config.sessions.unlinked.push({
@@ -737,8 +756,18 @@ function validateConfig(config) {
     const key = `${topic.chat_id}:${topic.topic_id}`;
     if (seen.has(key)) errors.push(`duplicate topic mapping: ${key}`);
     seen.add(key);
-    if (!config.agents[topic.agent]) errors.push(`topic ${topic.name} references unknown agent ${topic.agent}`);
-    if (!topic.session_id) errors.push(`topic ${topic.name} missing session_id`);
+    if (!config.agents[topic.agent]) {
+      errors.push(`topic ${topic.name} references unknown agent ${topic.agent}`);
+      continue;
+    }
+    if (topic.session && topic.session_id) {
+      errors.push(`topic ${topic.name} defines both session and legacy session_id`);
+    }
+    try {
+      if (!resolveTopicSession(config, topic).id) errors.push(`topic ${topic.name} missing session id`);
+    } catch (error) {
+      errors.push(error.message);
+    }
   }
   return errors;
 }
@@ -762,7 +791,10 @@ async function createTopicEntry(config, options) {
     chat_id: String(options.chatId),
     topic_id: String(topic.message_thread_id),
     agent: options.agentId,
-    session_id: options.sessionId || defaultSessionId(options.agentId, agent, options.name, topic.message_thread_id),
+    session: createTopicSessionConfig(
+      options.sessionId || defaultSessionId(options.agentId, agent, options.name, topic.message_thread_id),
+      options.cwd || agent.entity_dir || join("entities", options.agentId),
+    ),
     enabled: true,
     style: options.style ?? agent.branding?.style ?? null,
     avatar: options.avatar ?? agent.branding?.avatar ?? null,

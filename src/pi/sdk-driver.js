@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveTopicSession } from "../config.js";
 import { startRpcRun } from "./rpc-run.js";
 import { piRpcBroker } from "./rpc-transport.js";
 import { buildTopicRunSpec, formatTopicMessage } from "./topic-spec.js";
@@ -37,7 +38,7 @@ export function buildSdkRunSpec(config, topic, envelope, options = {}) {
 
   // Runtime construction itself happens only in worker.js.
   const base = buildTopicRunSpec(config, topic, envelope, options);
-  const configuredSessionId = String(topic.session_id || base.agent.session_id || `${topic.agent}-${topic.topic_id}`);
+  const configuredSessionId = resolveTopicSession(config, topic, { agent: base.agent }).id;
   if (base.sessionId !== configuredSessionId) {
     throw new Error(`The SDK worker session override does not match the configured topic: ${base.sessionId}`);
   }

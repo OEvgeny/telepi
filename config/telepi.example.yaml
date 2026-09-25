@@ -41,5 +41,8 @@ topics:
     name: Helper
     agent: helper
     model: openai/gpt-5
-    session_id: helper-main
+    session:
+      id: helper-main
+      location:
+        cwd: entities/helper
     enabled: true

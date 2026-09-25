@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { findTopic, getAgent, readConfig } from "../config.js";
+import { findTopic, getAgent, readConfig, resolveTopicSession } from "../config.js";
 import { resolvePiPackageIndex } from "./path.js";
 import { createTopicRuntime } from "./runtime.js";
 
@@ -59,7 +59,7 @@ export function resolveWorkerTopic(config, args) {
   }
 
   const agent = getAgent(config, topic.agent);
-  const sessionId = String(topic.session_id || agent.session_id || `${topic.agent}-${topic.topic_id}`);
+  const sessionId = resolveTopicSession(config, topic, { agent }).id;
   if (sessionId !== String(args.expectedSessionId)) {
     throw new Error(`Worker session changed before startup: ${sessionId} != ${args.expectedSessionId}`);
   }
