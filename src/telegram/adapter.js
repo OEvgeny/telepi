@@ -154,10 +154,6 @@ class TelegramAdapter {
     if (messageId) active.currentReplyToMessageId = messageId;
   }
 
-  messageIdFromPiMessage(message) {
-    return telegramMessageIdFromPiMessage(message);
-  }
-
   isDisplayMessageAllowed(displayMessages, type) {
     return isDisplayMessageAllowed(displayMessages, type);
   }

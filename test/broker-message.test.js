@@ -6,7 +6,12 @@ import {
   normalizeBrokerSubmitRequest,
   resolveBrokerTarget,
 } from "../src/broker-message.js";
-import { buildTopicRunSpec } from "../src/pi/topic-spec.js";
+import {
+  acknowledgeTopicMessageDelivery,
+  buildTopicRunSpec,
+  topicMessageDeliveryId,
+  topicMessageDeliveryIdFromPiMessage,
+} from "../src/pi/topic-spec.js";
 
 const config = {
   telegram: { bot_token_env: "TEST_TOKEN" },
@@ -81,6 +86,19 @@ test("broker messages use a transport-neutral routing header and expose the brok
     assert.match(spec.initialMessage, /^telepi_sender_topic=Sender$/m);
     assert.doesNotMatch(spec.initialMessage, /^Telegram topic route:/m);
     assert.equal(spec.env.TELEPI_BROKER_SOCKET, "/tmp/telepi-test/cache/broker.sock");
+
+    const piMessage = { content: [{ type: "text", text: spec.initialMessage }] };
+    assert.equal(topicMessageDeliveryId(envelope), "sender:call-2");
+    assert.equal(topicMessageDeliveryIdFromPiMessage(piMessage), "sender:call-2");
+    const steered = [envelope];
+    assert.equal(acknowledgeTopicMessageDelivery(steered, piMessage), true);
+    assert.deepEqual(steered, []);
+
+    const telegramSteered = [{ messageId: "42" }];
+    assert.equal(acknowledgeTopicMessageDelivery(telegramSteered, {
+      content: [{ type: "text", text: "telegram_message_id=42" }],
+    }), true);
+    assert.deepEqual(telegramSteered, []);
   } finally {
     if (previousToken === undefined) delete process.env.TEST_TOKEN;
     else process.env.TEST_TOKEN = previousToken;

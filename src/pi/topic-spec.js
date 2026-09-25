@@ -40,6 +40,32 @@ export function formatTopicMessage(config, topic, envelope) {
   return formatTelegramMessage(topic, withAliasName(config, envelope));
 }
 
+export function topicMessageDeliveryId(envelope) {
+  if (envelope.transport === "telepi") {
+    return String(envelope.brokerMessageId || envelope.updateId || "").trim() || null;
+  }
+  return String(envelope.messageId || "").trim() || null;
+}
+
+export function topicMessageDeliveryIdFromPiMessage(message) {
+  const text = (message?.content || [])
+    .filter((part) => part?.type === "text")
+    .map((part) => part.text || "")
+    .join("\n");
+  const match = text.match(/^(?:telegram|telepi)_message_id=(.+)$/m);
+  const id = match?.[1]?.trim();
+  return id && id !== "unknown" ? id : null;
+}
+
+export function acknowledgeTopicMessageDelivery(steered, message) {
+  const deliveryId = topicMessageDeliveryIdFromPiMessage(message);
+  if (!deliveryId) return false;
+  const index = steered.findIndex((envelope) => topicMessageDeliveryId(envelope) === deliveryId);
+  if (index < 0) return false;
+  steered.splice(index, 1);
+  return true;
+}
+
 // Agents should always see one stable name per person, regardless of the
 // user's current Telegram username/first name.
 function withAliasName(config, envelope) {

@@ -117,11 +117,12 @@ export default function (pi: ExtensionAPI) {
 		name: "telepi_send_message",
 		label: "Telepi Send Message",
 		description:
-			"Send a one-way text message to another mapped Telepi topic or uniquely mapped agent through the local broker. The broker starts an idle target, steers a running target, or queues the message at a safe boundary.",
+			"Send a one-way text message to another mapped Telepi topic or uniquely mapped agent through the local broker. This does not post text to Telegram and must not target the current topic or agent. The broker starts an idle target, steers a running target, or queues the message at a safe boundary.",
 		promptSnippet:
 			"Send a message to another Telepi agent or topic through the local broker",
 		promptGuidelines: [
 			"Use telepi_send_message when the user asks you to contact or wake another Telepi agent.",
+			"Never use telepi_send_message to notify the user or target your current topic/agent; normal assistant text is delivered to the current Telegram topic.",
 			"telepi_send_message only confirms broker acceptance; it does not wait for the recipient's reply.",
 		],
 		parameters: Type.Object({
@@ -133,11 +134,17 @@ export default function (pi: ExtensionAPI) {
 			if (!socketPath) throw new Error("TELEPI_BROKER_SOCKET is not configured for this session");
 			const agentId = process.env.TELEPI_AGENT_ID || "unknown-agent";
 			const topicName = process.env.TELEPI_TOPIC_NAME || "";
+			const target = params.to.trim();
+			if (target === topicName || target === agentId) {
+				throw new Error(
+					"telepi_send_message cannot target the current topic or agent; reply normally to post text in the current Telegram topic",
+				);
+			}
 			const result = await requestBroker(socketPath, {
 				version: BROKER_PROTOCOL_VERSION,
 				type: "submit",
 				id: `${agentId}:${toolCallId}`,
-				target: { name: params.to },
+				target: { name: target },
 				message: { text: params.message },
 				origin: {
 					kind: "agent",

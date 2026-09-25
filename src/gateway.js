@@ -11,6 +11,7 @@ import { normalizeBrokerSubmitRequest, resolveBrokerTarget, createBrokerEnvelope
 import { resolveBrokerSocketPath, startBrokerIpcServer } from "./broker-ipc.js";
 import { normalizePromptInboxInterval, startPromptInboxPolling } from "./prompt-inbox.js";
 import { acceptSdkRpcConnection, startPiForTopic } from "./pi/sdk-driver.js";
+import { acknowledgeTopicMessageDelivery, topicMessageDeliveryId } from "./pi/topic-spec.js";
 import { installTimestampedConsole } from "./logging.js";
 
 installTimestampedConsole();
@@ -392,7 +393,7 @@ function drainPendingEnvelopes(config, telegram, inFlight, topic, run) {
   }
   const [next, ...rest] = queued;
   markPendingQueueDirty();
-  console.error(`dispatching queued message chat=${next.chatId} topic=${next.topicId} agent=${topic.agent} message=${next.messageId} remaining=${rest.length}`);
+  console.error(`dispatching queued message chat=${next.chatId} topic=${next.topicId} agent=${topic.agent} message=${topicMessageDeliveryId(next) || "unknown"} remaining=${rest.length}`);
   dispatchTopicRun(config, telegram, inFlight, topic, next, rest);
 }
 
@@ -403,7 +404,7 @@ function drainPendingEnvelopes(config, telegram, inFlight, topic, run) {
 async function queueEnvelopeForRun(config, telegram, inFlight, topic, run, envelope) {
   run.pending.push(envelope);
   markPendingQueueDirty();
-  console.error(`queued message chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${envelope.messageId}`);
+  console.error(`queued message chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${topicMessageDeliveryId(envelope) || "unknown"}`);
   if (run.pendingDrained) {
     drainPendingEnvelopes(config, telegram, inFlight, topic, run);
   }
@@ -439,6 +440,13 @@ async function steerRunningTopic(config, telegram, inFlight, topic, envelope, ac
     return "rejected";
   }
 
+  // A run can inherit backlog from the run before it. Do not steer a newer
+  // arrival past those older envelopes: all sources share one FIFO topic queue.
+  if (active.pending.length) {
+    await queueEnvelopeForRun(config, telegram, inFlight, topic, active, envelope);
+    return "queued";
+  }
+
   const hydratedEnvelope = await telegram.hydrateEnvelope(config, envelope).catch((error) => {
     console.error(`steering media hydration failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
     return envelope;
@@ -456,7 +464,7 @@ async function steerRunningTopic(config, telegram, inFlight, topic, envelope, ac
       markPendingQueueDirty();
       throw error;
     }
-    console.error(`steered chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${envelope.messageId}`);
+    console.error(`steered chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${topicMessageDeliveryId(hydratedEnvelope) || "unknown"}`);
     return "steered";
   } catch (error) {
     console.error(`steering unavailable chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.message}`);
@@ -517,7 +525,7 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
         ? (text) => telegram.queueAssistantTextDisplay(active, envelope, text)
         : undefined,
       onEvent: (event) => {
-        acknowledgeSteeredEnvelope(telegram, active, event);
+        acknowledgeSteeredEnvelope(active, event);
         telegram.resetReasoningDisplayFromPiEvent(active, event);
         telegram.updateReplyAnchorFromPiEvent(active, event);
         if (telegram.isDeliveryEvent(event)) active.telegramDeliveryCount += 1;
@@ -629,14 +637,9 @@ function modelErrorFromPiEvent(event) {
   return String(message.errorMessage || "unknown model error");
 }
 
-function acknowledgeSteeredEnvelope(telegram, active, event) {
+function acknowledgeSteeredEnvelope(active, event) {
   if (event?.type !== "message_start" || event.message?.role !== "user") return;
-  const messageId = telegram.messageIdFromPiMessage(event.message);
-  if (!messageId) return;
-  const index = active.steered.findIndex((envelope) => String(envelope.messageId) === String(messageId));
-  if (index < 0) return;
-  active.steered.splice(index, 1);
-  markPendingQueueDirty();
+  if (acknowledgeTopicMessageDelivery(active.steered, event.message)) markPendingQueueDirty();
 }
 
 async function handleCompactCommand(config, telegram, topic, envelope, instructions) {
