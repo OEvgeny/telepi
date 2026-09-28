@@ -13,6 +13,7 @@ import { normalizePromptInboxInterval, startPromptInboxPolling } from "./prompt-
 import { acceptSdkRpcConnection, startPiForTopic } from "./pi/sdk-driver.js";
 import { acknowledgeTopicMessageDelivery, topicMessageDeliveryId } from "./pi/topic-spec.js";
 import { installTimestampedConsole } from "./logging.js";
+import { isStopCommand, requestTurnStop } from "./turn-control.js";
 
 installTimestampedConsole();
 
@@ -69,6 +70,10 @@ async function handleTelegramMessage(config, telegram, inFlight, topic, envelope
   const active = inFlight.get(key);
   if (isHelpCommand(envelope.text)) {
     await handleHelpCommand(telegram, config, topic, envelope);
+    return;
+  }
+  if (isStopCommand(envelope.text)) {
+    await handleStopCommand(telegram, topic, envelope, active);
     return;
   }
   if (isRetryCommand(envelope.text)) {
@@ -202,7 +207,7 @@ function isRetryCommand(text) {
 }
 
 function isGatewayCommand(text) {
-  return /^\/(?:help|retry|compact)(?:@\S+)?(?:\s|$)/i.test(String(text || "").trim());
+  return /^\/(?:help|stop|retry|compact)(?:@\S+)?(?:\s|$)/i.test(String(text || "").trim());
 }
 
 function retryKey(envelope) {
@@ -225,6 +230,7 @@ async function handleHelpCommand(telegram, config, topic, envelope) {
   const lines = [
     "telepi gateway commands:",
     "/help — show this message",
+    "/stop — stop the current turn in this topic",
     "/compact [instructions] — compact this topic's pi session",
     "/retry — rerun the last prompt in this topic",
     inboxEnabled
@@ -238,6 +244,39 @@ async function handleHelpCommand(telegram, config, topic, envelope) {
     text: lines.join("\n"),
     quote: true,
   });
+}
+
+async function handleStopCommand(telegram, topic, envelope, active) {
+  if (active) active.currentReplyToMessageId = envelope.messageId;
+  try {
+    const status = await requestTurnStop(active);
+    if (status === "requested") {
+      await telegram.clearCancelButton(active);
+      console.error(`stop requested chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${envelope.messageId}`);
+      return;
+    }
+    const text = status === "idle"
+      ? `No turn is running in ${topic.name}.`
+      : status === "stopping"
+        ? `${topic.name} is already stopping.`
+        : `${topic.name} is no longer accepting cancellation.`;
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: envelope.messageId,
+      text,
+      quote: true,
+    });
+  } catch (error) {
+    console.error(`stop failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: envelope.messageId,
+      text: `Could not stop ${topic.name}: ${error.message}`,
+      quote: true,
+    });
+  }
 }
 
 async function handleRetryCommand(config, telegram, inFlight, topic, envelope, active) {

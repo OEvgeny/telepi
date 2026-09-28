@@ -121,6 +121,7 @@ npm run telepi -- topic:prompt --topic Helper --text "..." [--no-echo] [--from "
 The gateway also owns a few Telegram slash commands directly:
 
 - `/help` — show gateway-owned commands.
+- `/stop` — stop the current turn in that topic without sending another prompt to the agent.
 - `/compact [instructions]` — compact the current topic's pi session.
 - `/retry` — rerun the last non-command prompt remembered for that chat/topic.
 

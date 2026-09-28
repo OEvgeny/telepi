@@ -426,6 +426,7 @@ function createTelegramIssueLimiter(telegram, minIntervalMs = GATEWAY_TELEGRAM_M
 async function configureBotCommands(telegram, config) {
   const commands = [
     { command: "help", description: "Show telepi gateway commands" },
+    { command: "stop", description: "Stop the current turn in this topic" },
     { command: "compact", description: "Compact the current pi session with an optional prompt" },
     { command: "retry", description: "Retry the last prompt in this topic" },
   ];
@@ -478,7 +479,7 @@ function commandChatIds(config) {
 
 function normalizeTelegramCommands(envelope, botUsername) {
   if (!botUsername || !envelope.text) return envelope;
-  const pattern = new RegExp(`^/(compact|help|retry)@${escapeRegExp(botUsername)}(?=\\s|$)`, "i");
+  const pattern = new RegExp(`^/(compact|help|stop|retry)@${escapeRegExp(botUsername)}(?=\\s|$)`, "i");
   const text = envelope.text.replace(pattern, "/$1");
   return text === envelope.text ? envelope : { ...envelope, text };
 }
