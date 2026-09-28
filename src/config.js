@@ -22,6 +22,22 @@ export function readConfig(configPath) {
   return normalizeConfig(data, path);
 }
 
+// CLI maintenance commands can rotate a topic's session immediately before
+// submitting its next broker prompt. Every ingress must therefore resolve
+// against a fresh config instead of a gateway-startup snapshot. A transient
+// malformed write keeps the last valid config so Telegram polling stays alive.
+export function createReloadingConfigReader(configPath, options = {}) {
+  let current = readConfig(configPath);
+  return () => {
+    try {
+      current = readConfig(configPath);
+    } catch (error) {
+      options.onError?.(error);
+    }
+    return current;
+  };
+}
+
 export function writeConfig(config, configPath) {
   const path = resolveConfigPath(configPath);
   mkdirSync(dirname(path), { recursive: true });

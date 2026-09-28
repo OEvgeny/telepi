@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
-import { readConfig, findTopicByName, resolveTopicSession, setTopicSessionId } from "./config.js";
+import { createReloadingConfigReader, findTopicByName, resolveTopicSession, setTopicSessionId } from "./config.js";
 import { createTelegramAdapter } from "./telegram/adapter.js";
 import { parseCompactCommand } from "./pi/compact.js";
 import { normalizeBrokerSubmitRequest, resolveBrokerTarget, createBrokerEnvelope } from "./broker-message.js";
@@ -27,18 +27,18 @@ const lastPromptByTopic = new Map();
 let queuePersistence;
 
 async function main() {
-  let config = readConfig(configPath);
+  const getConfig = createReloadingConfigReader(configPath, {
+    onError: (error) => console.error(`config reload failed: ${error.message}`),
+  });
+  const config = getConfig();
   const telegram = await createTelegramAdapter(config);
   const inFlight = new Map();
   initPendingQueuePersistence(config, inFlight);
-  await startBrokerApi(() => config, telegram, inFlight);
-  startConfiguredPromptInbox(() => config, telegram, inFlight);
+  await startBrokerApi(getConfig, telegram, inFlight);
+  startConfiguredPromptInbox(getConfig, telegram, inFlight);
 
   await telegram.poll({
-    getConfig: () => {
-      config = reloadConfig(config, configPath);
-      return config;
-    },
+    getConfig,
     inFlight,
     onMessage: (configForMessage, topic, envelope) => handleTelegramMessage(
       configForMessage,
@@ -187,15 +187,6 @@ async function handleBrokerSubmission(config, telegram, inFlight, request) {
     sessionId: resolveTopicSession(config, topic).id,
     telegramMessageId: telegramMessageId || null,
   };
-}
-
-function reloadConfig(previousConfig, path) {
-  try {
-    return readConfig(path);
-  } catch (error) {
-    console.error(`config reload failed: ${error.message}`);
-    return previousConfig;
-  }
 }
 
 function sendLongMessage(telegram, message) {
