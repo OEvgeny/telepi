@@ -168,28 +168,21 @@ export async function startRpcRun(args, {
       const streamedText = outputCollector.consume(event);
       if (streamedText) {
         streamedAssistantParts.push(streamedText);
-        // Do NOT stream intermediate assistant text here: every completed
-        // text_end (including working narration between tool calls) would
-        // become a separate Telegram message, flooding the chat on multi-
-        // step turns. The final answer is delivered by the message_end
-        // fallback below (final text that differs from the accumulated parts)
-        // and by pollTranscript (stopReason "stop" only).
+        // Each text_end is a complete assistant-authored message, including
+        // working narration before a tool call. Deliver it immediately so a
+        // long tool-heavy turn does not remain silent in Telegram.
+        enqueueText(streamedText);
       }
 
       // Some provider/transport paths persist message_end without emitting a
-      // usable text_end delta. Deliver the finalized assistant text as a
-      // fallback, but ONLY for the terminal message (stopReason "stop"):
-      // intermediate tool-calling turns carry working narration that must
-      // never reach the chat as its own message. The accumulated parts (from
-      // text_end deltas) and the message content agree for the final answer;
-      // enqueue whichever is non-empty so the live path is prompt and the
-      // transcript-poll path (below) is the authoritative fallback.
-      if (event.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason === "stop") {
+      // usable text_end delta. Fall back to the complete assistant message for
+      // both intermediate tool-calling turns and the terminal turn, while
+      // avoiding duplication when text_end already carried the same content.
+      if (event.type === "message_end" && event.message?.role === "assistant") {
         const finalText = textFromPiContent(event.message.content).trim();
         const streamedTextCombined = streamedAssistantParts.join("\n\n").trim();
-        const delivered = streamedTextCombined || finalText;
-        if (delivered) enqueueText(delivered);
-        scheduleTerminalSettle();
+        if (finalText && finalText !== streamedTextCombined) enqueueText(finalText);
+        if (event.message.stopReason === "stop") scheduleTerminalSettle();
       }
 
       // agent_end is only a low-level boundary and may still be followed by
