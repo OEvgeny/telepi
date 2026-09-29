@@ -77,6 +77,9 @@ test("topic:prompt submits to the broker instead of starting pi directly", async
     "  target:",
     "    name: Target",
     "    entity_dir: entities/target",
+    "  source:",
+    "    name: Source Agent",
+    "    entity_dir: entities/source",
     "topics:",
     "  - name: Target",
     "    agent: target",
@@ -113,7 +116,12 @@ test("topic:prompt submits to the broker instead of starting pi directly", async
     "--source", "agent-message-test",
   ], {
     cwd: root,
-    env: { ...process.env, TELEPI_BROKER_SOCKET: socketPath },
+    env: {
+      ...process.env,
+      TELEPI_BROKER_SOCKET: socketPath,
+      TELEPI_AGENT_ID: "",
+      TELEPI_TOPIC_NAME: "",
+    },
   });
 
   assert.equal(stderr, "");
@@ -128,6 +136,33 @@ test("topic:prompt submits to the broker instead of starting pi directly", async
   });
   assert.deepEqual(received.options, { echo: false });
   assert.match(received.id, /^cli:/);
+
+  received = undefined;
+  await execFileAsync(process.execPath, [
+    join(root, "bin/telepi.js"),
+    "-c", configPath,
+    "topic:prompt",
+    "--topic", "Target",
+    "--text", "Agent delivery",
+    "--no-echo",
+    "--from", "Misleading override",
+  ], {
+    cwd: root,
+    env: {
+      ...process.env,
+      TELEPI_BROKER_SOCKET: socketPath,
+      TELEPI_AGENT_ID: "source",
+      TELEPI_TOPIC_NAME: "Source topic",
+    },
+  });
+
+  assert.deepEqual(received.origin, {
+    kind: "agent",
+    name: "Source Agent",
+    agentId: "source",
+    topicName: "Source topic",
+    source: "agent:source",
+  });
 });
 
 test("broker socket path defaults to the configured cache and supports an override", () => {

@@ -56,6 +56,19 @@ export function resolveBrokerTarget(config, target) {
   return resolveUniqueAgentTopic(config, target.name);
 }
 
+export function createBrokerEchoDisplay(config, submit) {
+  const origin = submit.origin || {};
+  let header = "📨 Posted message";
+  if (origin.kind === "agent") {
+    const agentName = config.agents?.[origin.agentId]?.name || origin.name || origin.agentId;
+    if (agentName) header = `📨 Message from ${agentName}`;
+  }
+  return {
+    text: `${header}\n\n${submit.message.text}`,
+    blockquoteHeader: header,
+  };
+}
+
 export function createBrokerEnvelope(topic, submit, { telegramMessageId = "" } = {}) {
   const origin = submit.origin;
   const sourceIdentity = origin.agentId || origin.topicName || origin.name;

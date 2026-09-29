@@ -7,7 +7,12 @@ import { promisify } from "node:util";
 import { createReloadingConfigReader, findTopicByName, resolveTopicSession, setTopicSessionId } from "./config.js";
 import { createTelegramAdapter } from "./telegram/adapter.js";
 import { parseCompactCommand } from "./pi/compact.js";
-import { normalizeBrokerSubmitRequest, resolveBrokerTarget, createBrokerEnvelope } from "./broker-message.js";
+import {
+  createBrokerEchoDisplay,
+  createBrokerEnvelope,
+  normalizeBrokerSubmitRequest,
+  resolveBrokerTarget,
+} from "./broker-message.js";
 import { resolveBrokerSocketPath, startBrokerIpcServer } from "./broker-ipc.js";
 import { normalizePromptInboxInterval, startPromptInboxPolling } from "./prompt-inbox.js";
 import { acceptSdkRpcConnection, startPiForTopic } from "./pi/sdk-driver.js";
@@ -170,7 +175,7 @@ async function handleBrokerSubmission(config, telegram, inFlight, request) {
     const sentMessages = await sendLongMessage(telegram, {
       chatId: topic.chat_id,
       topicId: topic.topic_id,
-      text: request.message.text,
+      ...createBrokerEchoDisplay(config, request),
     });
     telegramMessageId = sentMessages[0]?.message_id == null
       ? ""

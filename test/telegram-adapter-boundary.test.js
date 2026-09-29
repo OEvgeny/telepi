@@ -58,12 +58,26 @@ test("concrete Telegram adapter initializes and renders through its client bound
     topicId: "20",
     text: "Adapter boundary",
   });
+  const header = "📨 Message from Source Agent";
+  await adapter.sendLongMessage({
+    chatId: "10",
+    topicId: "20",
+    text: `${header}\n\nSynthetic prompt`,
+    blockquoteHeader: header,
+  });
 
   assert.equal(sent[0].message_id, 123);
   assert.ok(calls.some((call) => call.method === "getMe"));
   const commands = calls.find((call) => call.method === "setMyCommands");
   assert.ok(commands.payload.commands.some((command) => command.command === "stop"));
-  const send = calls.find((call) => call.method === "sendMessage");
-  assert.equal(send.payload.chat_id, "10");
-  assert.equal(send.payload.message_thread_id, "20");
+  const sends = calls.filter((call) => call.method === "sendMessage");
+  assert.equal(sends[0].payload.chat_id, "10");
+  assert.equal(sends[0].payload.message_thread_id, "20");
+  assert.equal(sends[1].payload.text, `${header}\n\nSynthetic prompt`);
+  assert.deepEqual(sends[1].payload.entities, [{
+    type: "blockquote",
+    offset: 0,
+    length: header.length,
+  }]);
+  assert.equal(sends[1].payload.parse_mode, undefined);
 });

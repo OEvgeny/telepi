@@ -454,7 +454,7 @@ program
   .option("--text <text>", "Prompt text")
   .option("--stdin", "Read prompt text from stdin")
   .option("--no-echo", "Do not post the prompt into Telegram before broker delivery")
-  .option("--from <name>", "Sender name the agent sees in the routing header; defaults to the topic owner")
+  .option("--from <name>", "Sender name the agent sees; defaults to the topic owner (running Telepi agents are inferred)")
   .option("--source <text>", "Source/provenance line the agent sees in the routing header")
   .action(async (options) => {
     const config = load();
@@ -463,18 +463,30 @@ program
     const text = promptText(options);
     if (!text.trim()) throwCli("missing --text or non-empty --stdin");
 
-    const owner = options.from ? null : resolveUser(config, topic.owner);
+    const runningAgentId = String(process.env.TELEPI_AGENT_ID || "").trim();
+    const runningAgent = config.agents?.[runningAgentId];
+    const runningTopicName = String(process.env.TELEPI_TOPIC_NAME || "").trim();
+    const owner = options.from || runningAgent ? null : resolveUser(config, topic.owner);
+    const origin = runningAgent
+      ? {
+        kind: "agent",
+        name: runningAgent.name || runningTopicName || runningAgentId,
+        agentId: runningAgentId,
+        topicName: runningTopicName || undefined,
+        source: options.source || `agent:${runningAgentId}`,
+      }
+      : {
+        kind: "cli",
+        name: options.from || owner?.alias || "telepi-cli",
+        source: options.source || undefined,
+      };
     const request = {
       version: BROKER_PROTOCOL_VERSION,
       type: "submit",
       id: `cli:${randomUUID()}`,
       target: { topic: topic.name },
       message: { text },
-      origin: {
-        kind: "cli",
-        name: options.from || owner?.alias || "telepi-cli",
-        source: options.source || undefined,
-      },
+      origin,
       options: { echo: options.echo },
     };
     const result = await requestBroker(resolveBrokerSocketPath(config), request);

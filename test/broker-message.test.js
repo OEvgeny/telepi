@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createBrokerEchoDisplay,
   createBrokerEnvelope,
   normalizeBrokerSubmitRequest,
   resolveBrokerTarget,
@@ -26,6 +27,7 @@ const config = {
   agents: {
     primary: { name: "Primary", entity_dir: "/tmp/telepi-test/entities/primary", skills: [], extensions: [] },
     secondary: { name: "Secondary", entity_dir: "/tmp/telepi-test/entities/secondary", skills: [], extensions: [] },
+    sender: { name: "Sender", entity_dir: "/tmp/telepi-test/entities/sender", skills: [], extensions: [] },
   },
   topics: [
     { name: "Primary", agent: "primary", chat_id: "1", topic_id: "10", session_id: "primary-session" },
@@ -54,6 +56,36 @@ test("broker submit normalization and target resolution support topics and uniqu
   assert.equal(resolveBrokerTarget(config, { agent: "primary" }).name, "Primary");
   assert.throws(() => resolveBrokerTarget(config, { agent: "secondary" }), /multiple enabled topics/);
   assert.throws(() => resolveBrokerTarget(config, { name: "missing" }), /No enabled topic mapping/);
+});
+
+test("broker echo labels agent and generic posted prompts", () => {
+  const agentSubmit = normalizeBrokerSubmitRequest({
+    version: 1,
+    type: "submit",
+    id: "sender:echo",
+    target: { topic: "Primary" },
+    message: { text: "Please verify the route." },
+    origin: { kind: "agent", name: "Sender topic", agentId: "sender" },
+    options: { echo: true },
+  });
+  assert.deepEqual(createBrokerEchoDisplay(config, agentSubmit), {
+    text: "📨 Message from Sender\n\nPlease verify the route.",
+    blockquoteHeader: "📨 Message from Sender",
+  });
+
+  const cliSubmit = normalizeBrokerSubmitRequest({
+    version: 1,
+    type: "submit",
+    id: "cli:echo",
+    target: { topic: "Primary" },
+    message: { text: "Scheduled check" },
+    origin: { kind: "cli", name: "scheduler" },
+    options: { echo: true },
+  });
+  assert.deepEqual(createBrokerEchoDisplay(config, cliSubmit), {
+    text: "📨 Posted message\n\nScheduled check",
+    blockquoteHeader: "📨 Posted message",
+  });
 });
 
 test("broker messages use a transport-neutral routing header and expose the broker socket", () => {

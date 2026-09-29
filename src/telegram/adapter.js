@@ -620,14 +620,23 @@ async function sendLongMessage(adapter, message) {
   for (const [index, chunk] of chunks.entries()) {
     const quoted = Boolean(message.quote);
     const italic = Boolean(message.italic);
-    const converted = quoted || italic ? null : toTelegramMarkdownV2(chunk);
+    const blockquoteHeader = index === 0 && chunk.startsWith(message.blockquoteHeader || "")
+      ? String(message.blockquoteHeader || "")
+      : "";
+    const converted = quoted || italic || blockquoteHeader ? null : toTelegramMarkdownV2(chunk);
     const payload = {
       chatId: message.chatId,
       topicId: message.topicId,
       replyToMessageId: index === 0 ? message.replyToMessageId : undefined,
       text: converted ?? chunk,
       parseMode: converted ? "MarkdownV2" : undefined,
-      entities: quoted ? blockquoteEntities(chunk) : italic ? italicEntities(chunk) : undefined,
+      entities: quoted
+        ? blockquoteEntities(chunk)
+        : italic
+          ? italicEntities(chunk)
+          : blockquoteHeader
+            ? blockquoteEntities(blockquoteHeader)
+            : undefined,
       replyMarkup: index === chunks.length - 1 ? message.replyMarkup : undefined,
     };
     try {
