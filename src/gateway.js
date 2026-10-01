@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { createReloadingConfigReader, findTopicByName, resolveTopicSession, setTopicSessionId } from "./config.js";
 import { createTelegramAdapter } from "./telegram/adapter.js";
 import { parseCompactCommand } from "./pi/compact.js";
+import { advanceModelError } from "./pi/model-error.js";
 import {
   createBrokerEchoDisplay,
   createBrokerEnvelope,
@@ -564,8 +565,11 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
         telegram.resetReasoningDisplayFromPiEvent(active, event);
         telegram.updateReplyAnchorFromPiEvent(active, event);
         if (telegram.isDeliveryEvent(event)) active.telegramDeliveryCount += 1;
-        const modelError = modelErrorFromPiEvent(event);
-        if (modelError) active.lastModelError = modelError;
+        const modelError = advanceModelError(active.lastModelError, event);
+        active.lastModelError = modelError.lastError;
+        if (modelError.recoveredError) {
+          console.error(`model error recovered chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${modelError.recoveredError}`);
+        }
         if (!useDefaultAssistantDisplay) {
           telegram.queueDisplayPiEvent(active, envelope, event, displayMessages, {
             excludeTypes: streamAssistantMessages ? ["assistant/message"] : [],
@@ -613,9 +617,9 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
     });
     return;
   }
-  // A turn that died on a model/API error must say so — silence or a
-  // "completed without output" placeholder hides real failures (stalled
-  // inference, timeouts) from the user.
+  // A turn that ended on an unrecovered model/API error must say so — silence
+  // or a "completed without output" placeholder hides real failures. Transient
+  // errors cleared by a later successful assistant attempt stay diagnostic-only.
   if (result.ok && active.lastModelError) {
     await sendLongMessage(telegram, {
       chatId: envelope.chatId,
@@ -663,13 +667,6 @@ function hasConfiguredDisplayMessages(config, topic) {
 
 function configuredDisplayMessagesFor(config, topic) {
   return topic.display_messages || config.agents?.[topic.agent]?.display_messages || config.telegram.display_messages;
-}
-
-function modelErrorFromPiEvent(event) {
-  if (event?.type !== "message_end") return null;
-  const message = event.message;
-  if (message?.role !== "assistant" || message.stopReason !== "error") return null;
-  return String(message.errorMessage || "unknown model error");
 }
 
 function acknowledgeSteeredEnvelope(active, event) {
