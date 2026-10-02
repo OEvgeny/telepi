@@ -41,7 +41,7 @@ class TelegramAdapter {
     this.typingByTopic = new Map();
   }
 
-  async poll({ getConfig, inFlight, onMessage, onButtonMessage, onReactionMessage }) {
+  async poll({ getConfig, onMessage, onButtonMessage, onReactionMessage }) {
     let offset = Number(process.env.TELEPI_UPDATE_OFFSET || 0) || undefined;
     let pollFailures = 0;
 
@@ -66,7 +66,7 @@ class TelegramAdapter {
       for (const update of updates) {
         offset = update.update_id + 1;
         if (update.callback_query) {
-          this.handleCallbackQuery(config, inFlight, update.callback_query, onButtonMessage).catch((error) => {
+          this.handleCallbackQuery(config, update.callback_query, onButtonMessage).catch((error) => {
             console.error(`callback handling failed: ${error.stack || error.message}`);
           });
           continue;
@@ -162,10 +162,6 @@ class TelegramAdapter {
     return isTelegramDeliveryEvent(event);
   }
 
-  clearCancelButton(active) {
-    return clearCancelButton(this, active);
-  }
-
   initSentMessageIndex(config) {
     this.sentMessageIndexPath = resolve(config.project.cache_dir, "sent-messages.jsonl");
     mkdirSync(resolve(config.project.cache_dir), { recursive: true });
@@ -202,7 +198,7 @@ class TelegramAdapter {
     return null;
   }
 
-  async handleCallbackQuery(config, inFlight, query, onButtonMessage) {
+  async handleCallbackQuery(config, query, onButtonMessage) {
     const userId = query.from?.id == null ? null : String(query.from.id);
     if (!isAllowedUser(config, userId)) {
       await this.client.answerCallbackQuery({
@@ -222,50 +218,9 @@ class TelegramAdapter {
       return;
     }
 
-    const token = parseCancelCallbackData(query.data);
-    if (!token) {
-      await this.client.answerCallbackQuery({ callbackQueryId: query.id }).catch((error) => {
-        console.error(`answer unknown callback failed: ${error.message}`);
-      });
-      return;
-    }
-
-    const active = [...inFlight.values()].find((run) => run.cancelToken === token);
-    if (!active) {
-      await this.client.answerCallbackQuery({
-        callbackQueryId: query.id,
-        text: "This run is no longer active.",
-      }).catch((error) => {
-        console.error(`answer stale cancel failed: ${error.message}`);
-      });
-      await removeCallbackMessageMarkup(this.client, query).catch((error) => {
-        console.error(`remove stale cancel button failed: ${error.message}`);
-      });
-      return;
-    }
-
-    try {
-      await active.ready;
-      if (active.readyError) throw active.readyError;
-      if (!active.abort) throw new Error("run is not accepting cancellation");
-      await this.client.answerCallbackQuery({
-        callbackQueryId: query.id,
-        text: "Cancelling...",
-      });
-      active.cancelled = true;
-      await active.abort();
-      await this.clearCancelButton(active);
-      console.error(`cancel requested token=${token} user=${userId}`);
-    } catch (error) {
-      console.error(`cancel failed token=${token}: ${error.stack || error.message}`);
-      await this.client.answerCallbackQuery({
-        callbackQueryId: query.id,
-        text: `Cancel failed: ${error.message}`,
-        showAlert: true,
-      }).catch((sendError) => {
-        console.error(`answer cancel failure failed: ${sendError.message}`);
-      });
-    }
+    await this.client.answerCallbackQuery({ callbackQueryId: query.id }).catch((error) => {
+      console.error(`answer unknown callback failed: ${error.message}`);
+    });
   }
 
   async handleButtonCallback(config, query, buttonRef, onButtonMessage) {
@@ -492,11 +447,6 @@ function isAllowedUser(config, userId) {
   const allowed = config.telegram.allowed_user_ids || [];
   if (!allowed.length || allowed.includes("*")) return true;
   return userId != null && allowed.includes(String(userId));
-}
-
-function parseCancelCallbackData(data) {
-  const match = String(data || "").match(/^telepi:cancel:([A-Za-z0-9_-]+)$/);
-  return match?.[1] || null;
 }
 
 function parseButtonCallbackData(data) {
@@ -798,20 +748,6 @@ function pumpCoalescedTyping(adapter, key, state) {
 }
 
 async function sendStreamingText(adapter, active, envelope, text, options = {}) {
-  const previous = active.cancelMessage;
-  active.cancelGeneration += 1;
-  active.cancelMessage = undefined;
-  active.cancelButtonAttached = false;
-  clearTimeout(active.cancelAttachTimer);
-  active.cancelAttachTimer = undefined;
-  if (previous) {
-    await clearTelegramMessageReplyMarkup(adapter.client, previous).catch((error) => {
-      if (!isReplyMarkupAlreadyClear(error)) {
-        console.error(`clear previous cancel button failed chat=${previous.chatId} message=${previous.messageId}: ${error.message}`);
-      }
-    });
-  }
-
   const sentMessages = await adapter.sendLongMessage({
     chatId: envelope.chatId,
     topicId: envelope.topicId,
@@ -819,15 +755,7 @@ async function sendStreamingText(adapter, active, envelope, text, options = {}) 
     text,
     italic: options.italic,
   });
-  const latest = sentMessages.at(-1);
   active.displayedMessageCount += sentMessages.length;
-  if (!active.cancelled && latest?.message_id) {
-    active.cancelMessage = {
-      chatId: String(latest.chat?.id || envelope.chatId),
-      messageId: String(latest.message_id),
-    };
-    scheduleCancelButton(adapter, active);
-  }
   return sentMessages;
 }
 
@@ -870,7 +798,6 @@ async function sendOrAppendReasoningDisplayText(adapter, active, envelope, item)
     messageId: existing.messageId,
     text: combined,
     italic: true,
-    replyMarkup: shouldKeepCancelButton(active, existing) ? cancelButtonMarkup(active.cancelToken) : undefined,
   });
   existing.text = combined;
   existing.parts.push(item.text);
@@ -898,20 +825,9 @@ async function sendOrEditToolDisplayText(adapter, active, envelope, item) {
     chatId: existing.chatId,
     messageId: existing.messageId,
     text: item.text,
-    replyMarkup: shouldKeepCancelButton(active, existing) ? cancelButtonMarkup(active.cancelToken) : undefined,
   });
   existing.text = item.text;
   existing.lastEditedAt = Date.now();
-}
-
-function shouldKeepCancelButton(active, message) {
-  return Boolean(
-    active.abort &&
-    !active.cancelled &&
-    active.cancelMessage &&
-    String(active.cancelMessage.chatId) === String(message.chatId) &&
-    String(active.cancelMessage.messageId) === String(message.messageId)
-  );
 }
 
 function isDisplayMessageAllowed(displayMessages, type) {
@@ -1063,59 +979,6 @@ function telegramMessageIdFromPiMessage(message) {
     .join("\n");
   const match = text.match(/^telegram_message_id=(.+)$/m);
   return match?.[1]?.trim() || null;
-}
-
-function scheduleCancelButton(adapter, active) {
-  clearTimeout(active.cancelAttachTimer);
-  const generation = active.cancelGeneration;
-  active.cancelAttachTimer = setTimeout(() => {
-    const message = active.cancelMessage;
-    if (!message || active.cancelled || !active.abort) return;
-    adapter.client.editMessageReplyMarkup({
-      chatId: message.chatId,
-      messageId: message.messageId,
-      replyMarkup: cancelButtonMarkup(active.cancelToken),
-    }).then(() => {
-      if (active.cancelGeneration === generation && active.cancelMessage === message) {
-        active.cancelButtonAttached = true;
-      } else {
-        return clearTelegramMessageReplyMarkup(adapter.client, message).catch((error) => {
-          if (!isReplyMarkupAlreadyClear(error)) {
-            console.error(`clear stale attached cancel button failed chat=${message.chatId} message=${message.messageId}: ${error.message}`);
-          }
-        });
-      }
-    }).catch((error) => {
-      if (!isReplyMarkupAlreadyClear(error)) {
-        console.error(`attach cancel button failed chat=${message.chatId} message=${message.messageId}: ${error.message}`);
-      }
-    });
-  }, 900);
-}
-
-function cancelButtonMarkup(token) {
-  return {
-    inline_keyboard: [[{ text: "Cancel", callback_data: `telepi:cancel:${token}` }]],
-  };
-}
-
-async function clearCancelButton(adapter, active) {
-  active.cancelGeneration += 1;
-  clearTimeout(active.cancelAttachTimer);
-  active.cancelAttachTimer = undefined;
-  const message = active.cancelMessage;
-  active.cancelMessage = undefined;
-  active.cancelButtonAttached = false;
-  if (!message) return;
-  await clearTelegramMessageReplyMarkup(adapter.client, message).catch((error) => {
-    if (!isReplyMarkupAlreadyClear(error)) {
-      console.error(`clear cancel button failed chat=${message.chatId} message=${message.messageId}: ${error.message}`);
-    }
-  });
-}
-
-async function clearTelegramMessageReplyMarkup(telegram, message) {
-  await telegram.editMessageReplyMarkup({ chatId: message.chatId, messageId: message.messageId });
 }
 
 function isReplyMarkupAlreadyClear(error) {

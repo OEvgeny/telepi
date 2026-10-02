@@ -24,6 +24,17 @@ test("gateway composes the concrete Telegram adapter without owning Bot API mech
   assert.match(adapter, /hydrateEnvelopeMedia/);
 });
 
+test("active turns expose /stop without a cancel-button callback path", async () => {
+  const [gateway, adapter] = await Promise.all([
+    readFile(resolve(root, "src/gateway.js"), "utf8"),
+    readFile(resolve(root, "src/telegram/adapter.js"), "utf8"),
+  ]);
+
+  assert.match(gateway, /stopRequested/);
+  assert.doesNotMatch(gateway, /clearCancelButton|cancelToken|cancelMessage|cancelAttachTimer/);
+  assert.doesNotMatch(adapter, /telepi:cancel|cancelButtonMarkup|clearCancelButton|parseCancelCallbackData/);
+});
+
 test("concrete Telegram adapter initializes and renders through its client boundary", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "telepi-telegram-adapter-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

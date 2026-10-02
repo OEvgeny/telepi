@@ -121,7 +121,7 @@ npm run telepi -- topic:prompt --topic Helper --text "..." [--no-echo] [--from "
 The gateway also owns a few Telegram slash commands directly:
 
 - `/help` — show gateway-owned commands.
-- `/stop` — stop the current turn in that topic without sending another prompt to the agent.
+- `/stop` — stop the current turn in that topic without sending another prompt to the agent. This is the sole active-turn stop control; streamed messages do not carry a Cancel keyboard.
 - `/compact [instructions]` — compact the current topic's pi session.
 - `/retry` — rerun the last non-command prompt remembered for that chat/topic.
 
@@ -143,7 +143,7 @@ npm run gateway
 
 While a routed pi session is running, the gateway sends Telegram `typing` chat actions scoped to the topic. It does not rename topics for transient status; topic edits are reserved for real metadata changes.
 
-Agent runs have no destructive timeout by default. A model request or long-running tool can legitimately remain silent, so absence of pi events is not treated as failure; the topic stays busy until the run finishes or the user cancels it. Operators can explicitly set `idle_timeout_ms` for legacy idle-stop behavior or `hard_timeout_ms` for an absolute maximum runtime.
+Agent runs have no destructive timeout by default. A model request or long-running tool can legitimately remain silent, so absence of pi events is not treated as failure; the topic stays busy until the run finishes or the user sends `/stop`. Operators can explicitly set `idle_timeout_ms` for legacy idle-stop behavior or `hard_timeout_ms` for an absolute maximum runtime.
 
 By default, Telegram receives only assistant text messages. To expose more pi stream message kinds, add an explicit allowlist under `telegram`, an `agent`, or a specific `topic`; topic settings override agent settings, and agent settings override global Telegram settings:
 

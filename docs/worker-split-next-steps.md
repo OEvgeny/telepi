@@ -19,7 +19,7 @@ This replaces the earlier proposal to buffer worker events only in memory. Recen
 `src/gateway.js` currently combines all of these jobs:
 
 - Telegram polling, authorization, update normalization, media download, callback answers, and sending;
-- global Telegram pacing, formatting, splitting, edits, reactions, typing, and cancel-button maintenance;
+- global Telegram pacing, formatting, splitting, edits, reactions, typing, and `/stop` command handling;
 - topic routing, busy detection, steering, pending queues, retry memory, and prompt-inbox claiming;
 - pi RPC startup, event interpretation, transcript-tail recovery, cancellation, and settlement;
 - model-error classification, automatic session unlink/retry, and compaction subprocesses;
@@ -29,7 +29,7 @@ That coupling has produced concrete failure modes:
 
 - A gateway crash killed active image-generation pi/tool processes because they shared `telepi-gateway.service`'s cgroup.
 - Detached long-running service supervisors remained in the gateway cgroup even after reparenting. They now prevent a drain-first restart and would be killed by a forced restart.
-- Busy, pending, steered, retry, cancel, typing, and reply-anchor state lives in memory. `gateway-inflight-debug.json` explicitly is not restored.
+- Busy, pending, steered, retry, stop-request, typing, and reply-anchor state lives in memory. `gateway-inflight-debug.json` explicitly is not restored.
 - Telegram updates can be confirmed while their queued/steered work exists only in memory. A crash can therefore lose accepted work.
 - The prompt inbox deletes a file after dispatch, not after durable acceptance or completion.
 - `topic:prompt` can bypass the gateway's `inFlight` map and open the same session concurrently, producing competing transcript branches.
@@ -264,7 +264,7 @@ Add `telepi topic:status --topic <name>` backed entirely by runtime files. It sh
 
 - current run ID/unit/phase and heartbeat age;
 - current Telegram message and session ID;
-- whether steering/cancel is accepted;
+- whether steering or `/stop` is accepted;
 - queued envelope IDs/count and oldest age;
 - pending/sending/failed delivery count;
 - last terminal result/model error;

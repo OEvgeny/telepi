@@ -11,7 +11,7 @@ test("stop command accepts Telegram bot mentions but not command prefixes", () =
   assert.equal(isStopCommand("please /stop"), false);
 });
 
-test("turn stop waits until abort is ready and marks the run cancelled", async () => {
+test("turn stop waits until abort is ready and marks the stop request", async () => {
   let makeReady;
   let aborted = false;
   const active = {
@@ -19,7 +19,7 @@ test("turn stop waits until abort is ready and marks the run cancelled", async (
       makeReady = resolve;
     }),
     readyError: undefined,
-    cancelled: false,
+    stopRequested: false,
     abort: async () => {
       aborted = true;
     },
@@ -32,16 +32,16 @@ test("turn stop waits until abort is ready and marks the run cancelled", async (
 
   assert.equal(await stopping, "requested");
   assert.equal(aborted, true);
-  assert.equal(active.cancelled, true);
+  assert.equal(active.stopRequested, true);
   assert.equal(await requestTurnStop(active), "stopping");
 });
 
-test("turn stop handles idle, unavailable, and failed cancellation", async () => {
+test("turn stop handles idle, unavailable, and failed stop requests", async () => {
   assert.equal(await requestTurnStop(undefined), "idle");
   assert.equal(await requestTurnStop({
     ready: Promise.resolve(),
     readyError: undefined,
-    cancelled: false,
+    stopRequested: false,
     abort: undefined,
   }), "unavailable");
 
@@ -49,11 +49,11 @@ test("turn stop handles idle, unavailable, and failed cancellation", async () =>
   const active = {
     ready: Promise.resolve(),
     readyError: undefined,
-    cancelled: false,
+    stopRequested: false,
     abort: async () => {
       throw failure;
     },
   };
   await assert.rejects(requestTurnStop(active), failure);
-  assert.equal(active.cancelled, false);
+  assert.equal(active.stopRequested, false);
 });

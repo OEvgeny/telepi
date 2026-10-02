@@ -6,15 +6,15 @@ export async function requestTurnStop(active) {
   if (!active) return "idle";
   await active.ready;
   if (active.readyError) throw active.readyError;
-  if (active.cancelled) return "stopping";
+  if (active.stopRequested) return "stopping";
   if (typeof active.abort !== "function") return "unavailable";
 
-  active.cancelled = true;
+  active.stopRequested = true;
   try {
     await active.abort();
     return "requested";
   } catch (error) {
-    active.cancelled = false;
+    active.stopRequested = false;
     throw error;
   }
 }

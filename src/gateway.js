@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
@@ -46,7 +45,6 @@ async function main() {
 
   await telegram.poll({
     getConfig,
-    inFlight,
     onMessage: (configForMessage, topic, envelope) => handleTelegramMessage(
       configForMessage,
       telegram,
@@ -257,7 +255,6 @@ async function handleStopCommand(telegram, topic, envelope, active) {
   try {
     const status = await requestTurnStop(active);
     if (status === "requested") {
-      await telegram.clearCancelButton(active);
       console.error(`stop requested chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${envelope.messageId}`);
       return;
     }
@@ -265,7 +262,7 @@ async function handleStopCommand(telegram, topic, envelope, active) {
       ? `No turn is running in ${topic.name}.`
       : status === "stopping"
         ? `${topic.name} is already stopping.`
-        : `${topic.name} is no longer accepting cancellation.`;
+        : `${topic.name} cannot be stopped now.`;
     await sendLongMessage(telegram, {
       chatId: envelope.chatId,
       topicId: envelope.topicId,
@@ -324,12 +321,7 @@ function startTopicMessage(config, telegram, topic, envelope) {
     abort: undefined,
     steer: undefined,
     acceptsSteering: false,
-    cancelled: false,
-    cancelToken: randomBytes(9).toString("base64url"),
-    cancelMessage: undefined,
-    cancelAttachTimer: undefined,
-    cancelButtonAttached: false,
-    cancelGeneration: 0,
+    stopRequested: false,
     currentReplyToMessageId: envelope.messageId,
     displayedMessageCount: 0,
     telegramDeliveryCount: 0,
@@ -591,7 +583,6 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
     await active.displayQueue.catch((error) => {
       console.error(`display queue failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
     });
-    await telegram.clearCancelButton(active);
   }
   const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
   console.error(`completed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} ok=${result.ok} code=${result.code} duration=${durationSeconds}s`);
@@ -607,12 +598,12 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
     }
     console.error(`rpc prompt timeout recovery failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${recovered.error?.stack || recovered.error?.message || recovered.error}`);
   }
-  if (active.cancelled) {
+  if (active.stopRequested) {
     await sendLongMessage(telegram, {
       chatId: envelope.chatId,
       topicId: envelope.topicId,
       replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
-      text: `Cancelled ${topic.name}.`,
+      text: `Stopped ${topic.name}.`,
       quote: true,
     });
     return;
@@ -802,7 +793,7 @@ function serializePendingQueue(inFlight) {
       startedAt: run.startedAt,
       ageSeconds: run.startedAt ? Math.max(0, Math.round((Date.now() - Date.parse(run.startedAt)) / 1000)) : null,
       acceptsSteering: Boolean(run.acceptsSteering),
-      cancelled: Boolean(run.cancelled),
+      stopRequested: Boolean(run.stopRequested),
       readySettled: Boolean(run.readySettled),
       readyError: run.readyError ? String(run.readyError.stack || run.readyError.message || run.readyError) : null,
       displayedMessageCount: run.displayedMessageCount || 0,
@@ -814,7 +805,7 @@ function serializePendingQueue(inFlight) {
     });
   }
   return {
-    version: 2,
+    version: 3,
     purpose: "debug snapshot only; not restored or replayed by gateway",
     updatedAt: new Date().toISOString(),
     active,
