@@ -19,6 +19,7 @@ import { acceptSdkRpcConnection, startPiForTopic } from "./pi/sdk-driver.js";
 import { acknowledgeTopicMessageDelivery, topicMessageDeliveryId } from "./pi/topic-spec.js";
 import { installTimestampedConsole } from "./logging.js";
 import { isStopCommand, requestTurnStop } from "./turn-control.js";
+import { formatPreservedPromptTimeoutNotice, isRpcPromptResponseTimeout } from "./session-safety.js";
 
 installTimestampedConsole();
 
@@ -28,7 +29,6 @@ const configPath = process.argv.includes("--config")
   ? process.argv[process.argv.indexOf("--config") + 1]
   : undefined;
 
-const AUTO_RETRY_SOURCE = "auto-rpc-timeout-retry";
 const lastPromptByTopic = new Map();
 let queuePersistence;
 
@@ -219,7 +219,7 @@ function retryKey(envelope) {
 }
 
 function rememberRetryPrompt(envelope) {
-  if (envelope.source === AUTO_RETRY_SOURCE || isGatewayCommand(envelope.text)) return;
+  if (isGatewayCommand(envelope.text)) return;
   if (!String(envelope.text || "").trim() && !envelope.telegramAttachments?.length && !envelope.attachments?.length) return;
   lastPromptByTopic.set(retryKey(envelope), {
     ...envelope,
@@ -326,7 +326,6 @@ function startTopicMessage(config, telegram, topic, envelope) {
     displayedMessageCount: 0,
     telegramDeliveryCount: 0,
     lastModelError: undefined,
-    recoveredPromptTimeout: false,
     topic: {
       name: topic.name,
       agent: topic.agent,
@@ -509,37 +508,6 @@ async function steerRunningTopic(config, telegram, inFlight, topic, envelope, ac
   }
 }
 
-function shouldRecoverRpcPromptTimeout(result, active, envelope) {
-  return Boolean(
-    !result.ok &&
-    result.code === 1 &&
-    /Timeout waiting for response to prompt/i.test(result.stderr || "") &&
-    !active.recoveredPromptTimeout &&
-    envelope.source !== AUTO_RETRY_SOURCE,
-  );
-}
-
-async function unlinkTopicSessionWithCli(topic, newSessionId) {
-  const args = [
-    resolve("bin/telepi.js"),
-    "-c", configPath || "config/telepi.yaml",
-    "session:unlink",
-    "--name", topic.name,
-    "--session-id", newSessionId,
-    "--reason", "Automatic recovery after pi RPC prompt timeout",
-  ];
-  await execFileAsync(process.execPath, args, { cwd: resolve(".") });
-  return { ok: true };
-}
-
-function freshSessionIdForTopic(topic, date = new Date()) {
-  return `${topic.agent}-${topic.topic_id}-${compactTimestamp(date)}`;
-}
-
-function compactTimestamp(date) {
-  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
-}
-
 async function handleTopicMessage(config, telegram, topic, envelope, active) {
   console.error(`routing chat=${envelope.chatId} topic=${envelope.topicId} to ${topic.agent}/${resolveTopicSession(config, topic).id}`);
   const compactInstructions = parseCompactCommand(envelope.text);
@@ -600,24 +568,24 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
   }
   const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
   console.error(`completed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} ok=${result.ok} code=${result.code} duration=${durationSeconds}s`);
-  if (shouldRecoverRpcPromptTimeout(result, active, envelope)) {
-    const newSessionId = freshSessionIdForTopic(topic);
-    const recovered = await unlinkTopicSessionWithCli(topic, newSessionId).catch((error) => ({ ok: false, error }));
-    if (recovered.ok) {
-      setTopicSessionId(topic, newSessionId);
-      active.recoveredPromptTimeout = true;
-      active.pending.unshift({ ...envelope, source: AUTO_RETRY_SOURCE });
-      console.error(`recovered rpc prompt timeout chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} new_session=${newSessionId}; retrying message=${envelope.messageId}`);
-      return;
-    }
-    console.error(`rpc prompt timeout recovery failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${recovered.error?.stack || recovered.error?.message || recovered.error}`);
-  }
   if (active.stopRequested) {
     await sendLongMessage(telegram, {
       chatId: envelope.chatId,
       topicId: envelope.topicId,
       replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
       text: `Stopped ${topic.name}.`,
+      quote: true,
+    });
+    return;
+  }
+  if (isRpcPromptResponseTimeout(result)) {
+    const sessionId = resolveTopicSession(config, topic).id;
+    console.error(`rpc prompt response timeout chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} session=${sessionId}; session preserved and prompt not retried`);
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
+      text: formatPreservedPromptTimeoutNotice(topic.name, sessionId),
       quote: true,
     });
     return;

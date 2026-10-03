@@ -173,7 +173,11 @@ class BrokerRpcClient {
   }
 
   prompt(message, images) {
-    return this.send({ type: "prompt", message, images });
+    // Pi acknowledges prompt only after preflight work, which can include a
+    // full automatic compaction. That is legitimate model work, not a dead
+    // transport, so the run's idle/hard limits own its lifetime instead of the
+    // generic control-response timeout.
+    return this.send({ type: "prompt", message, images }, { timeoutMs: 0 });
   }
 
   steer(message, images) {
@@ -230,15 +234,17 @@ class BrokerRpcClient {
     for (const listener of this.eventListeners) listener(body);
   }
 
-  send(command) {
+  send(command, { timeoutMs = this.options.responseTimeoutMs ?? RPC_RESPONSE_TIMEOUT_MS } = {}) {
     if (!this.started || !this.peer) return Promise.reject(new Error("Client not started"));
     if (this.exitError) return Promise.reject(this.exitError);
     const id = `req_${++this.requestId}`;
     return new Promise((resolvePromise, rejectPromise) => {
-      const timeout = setTimeout(() => {
-        this.pendingRequests.delete(id);
-        rejectPromise(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
-      }, RPC_RESPONSE_TIMEOUT_MS);
+      const timeout = timeoutMs > 0
+        ? setTimeout(() => {
+            this.pendingRequests.delete(id);
+            rejectPromise(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
+          }, timeoutMs)
+        : undefined;
       this.pendingRequests.set(id, {
         resolve: (response) => {
           clearTimeout(timeout);

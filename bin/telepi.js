@@ -20,6 +20,10 @@ import { TelegramClient, normalizeTopicColor, resolveForumTopicIcon } from "../s
 import { blockquoteEntities, toTelegramMarkdownV2 } from "../src/telegram/format.js";
 import { BROKER_PROTOCOL_VERSION, requestBroker, resolveBrokerSocketPath } from "../src/broker-ipc.js";
 import { buildPiCliSpec } from "../src/pi/cli-command.js";
+import {
+  formatFreshSessionSwitchNotice,
+  formatRestoredSessionSwitchNotice,
+} from "../src/session-safety.js";
 
 const program = new Command();
 
@@ -631,7 +635,7 @@ program
   .requiredOption("--name <name>", "Existing mapping name")
   .option("--session-id <id>", "New pi session id; defaults to a generated id")
   .option("--reason <text>", "Reason to store in session history")
-  .action((options) => {
+  .action(async (options) => {
     const config = load();
     const topic = findTopicByName(config, options.name);
     if (!topic) throwCli(`unknown topic mapping: ${options.name}`);
@@ -640,6 +644,7 @@ program
     if (String(oldSessionId) === String(newSessionId)) throwCli("new session id must differ from the current session id");
     config.sessions ||= {};
     config.sessions.unlinked ||= [];
+    const reason = options.reason || null;
     config.sessions.unlinked.push({
       topic_name: topic.name,
       chat_id: String(topic.chat_id),
@@ -648,10 +653,16 @@ program
       session_id: String(oldSessionId),
       replaced_by_session_id: String(newSessionId),
       unlinked_at: new Date().toISOString(),
-      reason: options.reason || null,
+      reason,
     });
     setTopicSessionId(topic, newSessionId);
     save(config);
+    await notifyTopicBestEffort(config, topic, formatFreshSessionSwitchNotice({
+      topicName: topic.name,
+      previousSessionId: oldSessionId,
+      nextSessionId: newSessionId,
+      reason,
+    }));
     console.log(`unlinked ${topic.name}: ${oldSessionId} -> ${newSessionId}`);
   });
 
@@ -661,7 +672,7 @@ program
   .requiredOption("--name <name>", "Existing mapping name")
   .option("--session-id <id>", "Previous pi session id to restore")
   .option("--index <number>", "1-based index from session:list --topic <name> --unlinked")
-  .action((options) => {
+  .action(async (options) => {
     const config = load();
     const topic = findTopicByName(config, options.name);
     if (!topic) throwCli(`unknown topic mapping: ${options.name}`);
@@ -688,6 +699,11 @@ program
       reason: "restore replaced active session",
     });
     save(config);
+    await notifyTopicBestEffort(config, topic, formatRestoredSessionSwitchNotice({
+      topicName: topic.name,
+      previousSessionId: oldSessionId,
+      nextSessionId: sessionId,
+    }));
     console.log(`restored ${topic.name}: ${oldSessionId} -> ${sessionId}`);
   });
 
@@ -732,6 +748,19 @@ function load() {
 
 function save(config) {
   writeConfig(serializableConfig(config), resolveConfigPath(program.opts().config));
+}
+
+async function notifyTopicBestEffort(config, topic, text) {
+  try {
+    const telegram = new TelegramClient(getBotToken(config));
+    await telegram.sendMessage({
+      chatId: topic.chat_id,
+      topicId: topic.topic_id,
+      text,
+    });
+  } catch (error) {
+    console.error(`warning: session changed but Telegram notification failed for ${topic.name}: ${error.message}`);
+  }
 }
 
 function validateConfig(config) {

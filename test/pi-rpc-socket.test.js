@@ -23,16 +23,19 @@ process.stdin.on("data", (chunk) => {
     if (newline < 0) break;
     const command = JSON.parse(buffer.slice(0, newline).replace(/\\r$/, ""));
     buffer = buffer.slice(newline + 1);
+    // Pi acknowledges prompt only after preflight work such as auto-compaction.
+    // Delay it beyond this test client's generic response timeout to prove the
+    // prompt remains pending instead of being mistaken for a dead session.
+    const respond = () => process.stdout.write(JSON.stringify({
+      id: command.id,
+      type: "response",
+      command: command.type,
+      success: true,
+    }) + "\\n");
     // Pi 0.85 acknowledges abort only after the whole session is idle. Leave
     // that response pending to prove Telepi treats a written abort as accepted.
-    if (command.type !== "abort") {
-      process.stdout.write(JSON.stringify({
-        id: command.id,
-        type: "response",
-        command: command.type,
-        success: true,
-      }) + "\\n");
-    }
+    if (command.type === "prompt") setTimeout(respond, 50);
+    else if (command.type !== "abort") respond();
     process.stdout.write(JSON.stringify({
       type: "transport_probe",
       command: command.type,
@@ -60,6 +63,7 @@ process.stdin.on("data", (chunk) => {
     cwd: directory,
     env: { TELEPI_BROKER_SOCKET: socketPath },
     args: [],
+    responseTimeoutMs: 10,
   });
   t.after(() => client.stop());
   const events = [];

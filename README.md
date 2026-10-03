@@ -86,7 +86,7 @@ npm run telepi -- session:unlink --name Helper --reason "fresh conversation"
 npm run telepi -- session:restore --name Helper --session-id helper-1001
 ```
 
-`session:unlink` changes only the topic mapping's active session id; the old `.telepi/pi-sessions/*.jsonl` files are preserved and recorded under `sessions.unlinked` in `config/telepi.yaml`.
+`session:unlink` changes only the topic mapping's active session id; the old `.telepi/pi-sessions/*.jsonl` files are preserved and recorded under `sessions.unlinked` in `config/telepi.yaml`. Both `session:unlink` and `session:restore` post a Telegram notice identifying the previous and new downstream sessions and explaining whether conversational context is fresh or restored.
 
 Compact a long-running session:
 
@@ -143,7 +143,7 @@ npm run gateway
 
 While a routed pi session is running, the gateway sends Telegram `typing` chat actions scoped to the topic. If the run produces no visible Telegram output for one minute, the gateway also posts one preformatted activity message and edits it once per minute. The three-line snapshot reports the Pi model-step count, tool-call count, completed output tokens, current observable phase and duration, and previous completed step. It is removed when visible output resumes or the run ends. Raw reasoning, tool arguments, and tool output are never included. The gateway does not rename topics for transient status; topic edits are reserved for real metadata changes.
 
-Agent runs have no destructive timeout by default. A model request or long-running tool can legitimately remain silent, so absence of pi events is not treated as failure; the topic stays busy until the run finishes or the user sends `/stop`. Operators can explicitly set `idle_timeout_ms` for legacy idle-stop behavior or `hard_timeout_ms` for an absolute maximum runtime.
+Agent runs have no destructive timeout by default. A model request, prompt preflight compaction, or long-running tool can legitimately remain silent, so absence of pi events is not treated as failure; the topic stays busy until the run finishes or the user sends `/stop`. Prompt acknowledgement is not subject to the generic RPC control-response timeout because Pi acknowledges only after preflight work completes. A prompt failure never causes Telepi to unlink the active session or silently retry in a fresh one. Operators can explicitly set `idle_timeout_ms` for legacy idle-stop behavior or `hard_timeout_ms` for an absolute maximum runtime.
 
 By default, Telegram receives only assistant text messages. To expose more pi stream message kinds, add an explicit allowlist under `telegram`, an `agent`, or a specific `topic`; topic settings override agent settings, and agent settings override global Telegram settings:
 
