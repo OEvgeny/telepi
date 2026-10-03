@@ -2,7 +2,7 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { findTopic, getAgent, readConfig, resolveTopicSession } from "../config.js";
-import { resolvePiPackageIndex } from "./path.js";
+import { assertSupportedPiSdk, resolvePiPackageIndex } from "./path.js";
 import { createTopicRuntime } from "./runtime.js";
 
 export function parseWorkerArgs(argv) {
@@ -71,6 +71,7 @@ export async function runWorker(argv = process.argv.slice(2)) {
   const config = readConfig(args.configPath);
   const topic = resolveWorkerTopic(config, args);
   const pi = await import(pathToFileURL(resolvePiPackageIndex()).href);
+  assertSupportedPiSdk(pi);
   const { runtime } = await createTopicRuntime(pi, config, topic);
 
   for (const diagnostic of runtime.diagnostics) {

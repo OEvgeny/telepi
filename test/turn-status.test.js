@@ -39,6 +39,17 @@ test("turn status renders current and previous model steps from Pi events", () =
   ].join("\n"));
 });
 
+test("turn status reads Pi 1.0 tool names from delta-only RPC events", () => {
+  const state = createTurnStatusState(0);
+  advanceTurnStatus(state, {
+    type: "message_update",
+    assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, id: "call-1", toolName: "codex-research" },
+  }, 1_000);
+
+  assert.equal(state.phase.key, "calling:codex-research");
+  assert.equal(state.phase.label, "Calling Codex research");
+});
+
 test("turn status counts parallel tools once and reports failed previous work", () => {
   const state = createTurnStatusState(0);
   advanceTurnStatus(state, { type: "turn_start", turnIndex: 3 }, 0);

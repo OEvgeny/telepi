@@ -172,20 +172,22 @@ class BrokerRpcClient {
     return this.stderr;
   }
 
-  prompt(message, images) {
+  async prompt(message, images) {
     // Pi acknowledges prompt only after preflight work, which can include a
     // full automatic compaction. That is legitimate model work, not a dead
     // transport, so the run's idle/hard limits own its lifetime instead of the
     // generic control-response timeout.
-    return this.send({ type: "prompt", message, images }, { timeoutMs: 0 });
+    const response = await this.send({ type: "prompt", message, images }, { timeoutMs: 0 });
+    return rpcResponseData(response)?.disposition;
   }
 
-  steer(message, images) {
-    return this.send({ type: "steer", message, images });
+  async steer(message, images) {
+    const response = await this.send({ type: "steer", message, images });
+    return rpcResponseData(response)?.disposition;
   }
 
   async abort() {
-    // Pi 0.85's abort waits for the whole session to become idle before it
+    // Pi's abort waits for the whole session to become idle before it
     // responds. Clear queued steers first so aborting the current model/tool
     // operation cannot immediately continue into older steering work, then
     // report transport acceptance instead of mistaking slow settlement for a
@@ -312,6 +314,13 @@ class BrokerRpcClient {
     this.ready.reject(this.exitError);
     this.rejectPendingRequests(this.exitError);
   }
+}
+
+function rpcResponseData(response) {
+  if (response?.success === false) {
+    throw new Error(response.error || `Pi RPC ${response.command || "command"} failed`);
+  }
+  return response?.data;
 }
 
 function deferred() {

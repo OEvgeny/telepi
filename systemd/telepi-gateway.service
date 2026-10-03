@@ -7,8 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/telepi
 Environment=TELEPI_CONFIG=%h/telepi/config/telepi.yaml
-Environment=TELEPI_PI_BIN=%h/.npm/bin/pi
-Environment=PATH=%h/.npm/bin:%h/.nix-profile/bin:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.nix-profile/bin:%h/.local/bin:%h/.npm/bin:%h/.local/share/pnpm:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin
 Environment=TELEPI_PROMPT_INBOX_DIR=%h/telepi/.telepi/prompt-inbox
 Environment=TELEPI_PROMPT_INBOX_INTERVAL_MS=1000
 EnvironmentFile=-%h/telepi/.env

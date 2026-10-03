@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   createTopicSessionConfig,
   findTopicByName,
@@ -20,6 +21,7 @@ import { TelegramClient, normalizeTopicColor, resolveForumTopicIcon } from "../s
 import { blockquoteEntities, toTelegramMarkdownV2 } from "../src/telegram/format.js";
 import { BROKER_PROTOCOL_VERSION, requestBroker, resolveBrokerSocketPath } from "../src/broker-ipc.js";
 import { buildPiCliSpec } from "../src/pi/cli-command.js";
+import { assertSupportedPiSdk, resolvePiCliPath, resolvePiPackageIndex } from "../src/pi/path.js";
 import {
   formatFreshSessionSwitchNotice,
   formatRestoredSessionSwitchNotice,
@@ -34,10 +36,17 @@ program
 
 program
   .command("validate")
-  .description("Validate the YAML config and referenced agents")
-  .action(() => {
+  .description("Validate the YAML config, referenced agents, and Pi installation")
+  .action(async () => {
     const config = load();
     const errors = validateConfig(config);
+    try {
+      resolvePiCliPath();
+      const packageIndex = resolvePiPackageIndex();
+      assertSupportedPiSdk(await import(pathToFileURL(packageIndex).href));
+    } catch (error) {
+      errors.push(`pi installation: ${error.message}`);
+    }
     if (errors.length) {
       for (const error of errors) console.error(`error: ${error}`);
       process.exit(1);

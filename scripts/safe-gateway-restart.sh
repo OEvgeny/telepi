@@ -131,10 +131,24 @@ if [[ -n "$MODEL" ]]; then
 fi
 
 PI_BIN="${TELEPI_PI_BIN:-}"
-if [[ -z "$PI_BIN" ]]; then
-  PI_BIN="$(command -v pi || true)"
+if [[ -n "$PI_BIN" && ! -x "$PI_BIN" ]]; then
+  report_failure "⚠️ Safe gateway restart worker found an invalid TELEPI_PI_BIN: $PI_BIN"
+  exit 1
 fi
-if [[ -z "$PI_BIN" || ! -x "$PI_BIN" ]]; then
+if [[ -z "$PI_BIN" ]]; then
+  for candidate in \
+    "$(command -v pi || true)" \
+    "$HOME/.nix-profile/bin/pi" \
+    "$HOME/.local/bin/pi" \
+    "$HOME/.npm/bin/pi" \
+    "$HOME/.local/share/pnpm/pi"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      PI_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$PI_BIN" ]]; then
   report_failure "⚠️ Safe gateway restart worker could not find the pi CLI. Set TELEPI_PI_BIN to its absolute path."
   exit 1
 fi

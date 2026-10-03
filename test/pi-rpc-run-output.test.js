@@ -107,6 +107,49 @@ test("RPC run delivers intermediate assistant messages before the final answer",
   assert.equal(stopped, true);
 });
 
+test("RPC run finishes when Pi handles a prompt without starting model work", async () => {
+  let listener;
+  let stopped = false;
+  const client = {
+    async start() {},
+    onEvent(callback) {
+      listener = callback;
+      return () => {
+        listener = undefined;
+      };
+    },
+    async prompt() {
+      return "handled";
+    },
+    async abort() {},
+    async steer() {},
+    async stop() {
+      stopped = true;
+    },
+    getStderr() {
+      return "";
+    },
+  };
+
+  const run = await startRpcRun([], {
+    workerPath: "/tmp/telepi-test-worker.js",
+    cwd: process.cwd(),
+    idleTimeoutMs: 0,
+    hardTimeoutMs: 0,
+    initialMessage: "/extension-command",
+    steerMessage: (message) => message,
+    sessionDir: "/tmp/telepi-test-missing-sessions",
+    sessionId: "missing",
+    createRpcClient: () => client,
+  });
+  const result = await run.promise;
+
+  assert.equal(result.ok, true);
+  assert.equal(result.streamedTextCount, 0);
+  assert.equal(stopped, true);
+  assert.equal(listener, undefined);
+});
+
 test("RPC abort force-settles a worker that accepts abort but never becomes idle", async () => {
   let listener;
   let abortAccepted = false;

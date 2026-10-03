@@ -45,6 +45,7 @@ export async function startRpcRun(args, {
     const deliveredTexts = new Set();
     let streamedAssistantParts = [];
     let initialUserMessageSeen = false;
+    let runActivitySeen = false;
     let settled = false;
     let idleTimer;
     let transcriptTimer;
@@ -109,7 +110,7 @@ export async function startRpcRun(args, {
       await client.abort();
       if (settled) return;
       clearTimeout(abortSettleTimer);
-      // Pi 0.85 can abort the provider call and then enter auto-compaction, or
+      // Pi can abort the provider call and then enter auto-compaction, or
       // wait indefinitely for a tool/extension before replying. A Telegram
       // stop owns the worker lifecycle, so bound graceful settlement and close
       // this run if native RPC does not emit agent_settled promptly.
@@ -177,6 +178,9 @@ export async function startRpcRun(args, {
     unsubscribe = client.onEvent((event) => {
       refreshIdleTimer();
       onEvent?.(event);
+      if (["agent_start", "turn_start", "message_start"].includes(event.type)) {
+        runActivitySeen = true;
+      }
 
       if (event.type === "message_start" && event.message?.role === "assistant") {
         streamedAssistantParts = [];
@@ -222,7 +226,20 @@ export async function startRpcRun(args, {
       }
     });
 
-    client.prompt(initialMessage).catch((error) => {
+    client.prompt(initialMessage).then((disposition) => {
+      // Pi 0.99+ distinguishes a prompt consumed by an extension/input handler
+      // from one that started model work. A handled prompt has no required
+      // agent_settled event, so close the worker unless a run already began.
+      if (disposition === "handled" && !runActivitySeen) {
+        void finish({
+          ok: true,
+          code: 0,
+          stdout: outputCollector.text() || terminalTranscriptText,
+          stderr: client.getStderr().trim(),
+          streamedTextCount,
+        });
+      }
+    }).catch((error) => {
       void finish({
         ok: false,
         code: 1,

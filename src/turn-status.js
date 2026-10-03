@@ -37,7 +37,7 @@ export function advanceTurnStatus(state, event, now = Date.now()) {
     if (type.startsWith("thinking_")) setPhase(state, "reasoning", "Reasoning", now);
     else if (type.startsWith("text_")) setPhase(state, "drafting", "Drafting response", now);
     else if (type.startsWith("toolcall_")) {
-      const name = messageEvent?.toolCall?.name;
+      const name = messageEvent?.toolCall?.name || messageEvent?.toolName;
       setPhase(state, `calling:${name || "tool"}`, name ? `Calling ${displayToolName(name)}` : "Preparing tool call", now);
     }
     return state;

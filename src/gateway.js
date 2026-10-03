@@ -16,6 +16,7 @@ import {
 import { resolveBrokerSocketPath, startBrokerIpcServer } from "./broker-ipc.js";
 import { normalizePromptInboxInterval, startPromptInboxPolling } from "./prompt-inbox.js";
 import { acceptSdkRpcConnection, startPiForTopic } from "./pi/sdk-driver.js";
+import { resolvePiCliPath, resolvePiPackageIndex } from "./pi/path.js";
 import { acknowledgeTopicMessageDelivery, topicMessageDeliveryId } from "./pi/topic-spec.js";
 import { installTimestampedConsole } from "./logging.js";
 import { isStopCommand, requestTurnStop } from "./turn-control.js";
@@ -32,6 +33,9 @@ const lastPromptByTopic = new Map();
 let queuePersistence;
 
 async function main() {
+  const piCliPath = resolvePiCliPath();
+  const piPackageIndex = resolvePiPackageIndex();
+  console.error(`pi installation ready cli=${piCliPath} sdk=${piPackageIndex}`);
   const getConfig = createReloadingConfigReader(configPath, {
     onError: (error) => console.error(`config reload failed: ${error.message}`),
   });

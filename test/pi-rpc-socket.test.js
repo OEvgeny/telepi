@@ -26,13 +26,19 @@ process.stdin.on("data", (chunk) => {
     // Pi acknowledges prompt only after preflight work such as auto-compaction.
     // Delay it beyond this test client's generic response timeout to prove the
     // prompt remains pending instead of being mistaken for a dead session.
-    const respond = () => process.stdout.write(JSON.stringify({
-      id: command.id,
-      type: "response",
-      command: command.type,
-      success: true,
-    }) + "\\n");
-    // Pi 0.85 acknowledges abort only after the whole session is idle. Leave
+    const respond = () => {
+      const rejected = command.message === "reject this prompt";
+      process.stdout.write(JSON.stringify({
+        id: command.id,
+        type: "response",
+        command: command.type,
+        success: !rejected,
+        ...(rejected ? { error: "prompt rejected in preflight" } : {}),
+        ...(!rejected && command.type === "prompt" ? { data: { disposition: "started" } } : {}),
+        ...(!rejected && command.type === "steer" ? { data: { disposition: "queued" } } : {}),
+      }) + "\\n");
+    };
+    // Pi acknowledges abort only after the whole session is idle. Leave
     // that response pending to prove Telepi treats a written abort as accepted.
     if (command.type === "prompt") setTimeout(respond, 50);
     else if (command.type !== "abort") respond();
@@ -70,13 +76,15 @@ process.stdin.on("data", (chunk) => {
   client.onEvent((event) => events.push(event));
 
   await client.start();
-  await client.prompt("line one\nline two \u2028 привет");
-  await client.steer("change course");
+  assert.equal(await client.prompt("line one\nline two \u2028 привет"), "started");
+  await assert.rejects(client.prompt("reject this prompt"), /prompt rejected in preflight/);
+  assert.equal(await client.steer("change course"), "queued");
   await client.abort();
-  await waitFor(() => events.length === 4);
+  await waitFor(() => events.length === 5);
 
   assert.deepEqual(events, [
     { type: "transport_probe", command: "prompt", message: "line one\nline two \u2028 привет" },
+    { type: "transport_probe", command: "prompt", message: "reject this prompt" },
     { type: "transport_probe", command: "steer", message: "change course" },
     { type: "transport_probe", command: "clear_queue" },
     { type: "transport_probe", command: "abort" },

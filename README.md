@@ -47,6 +47,8 @@ npm run telepi -- topics
 npm run telepi -- icons
 ```
 
+`validate` also resolves the active Pi CLI, follows its package manifest to the public SDK entry, and checks the SDK exports Telepi requires. Run it after every Pi upgrade before restarting the gateway.
+
 Create an agent entity:
 
 ```bash
@@ -193,7 +195,7 @@ Button state lives in `.telepi/cache/button-callbacks.jsonl`, one record per sen
 
 ## Running as a service
 
-Install as a systemd user service after adjusting paths in `systemd/telepi-gateway.service` if this repo is not at `~/telepi`, Node is not in `~/.nix-profile/bin`, or pi is not in `~/.npm/bin`. The unit sets an explicit runtime `PATH` and `TELEPI_PI_BIN` so it does not depend on a login shell or a desktop session importing environment variables after boot:
+Install as a systemd user service after adjusting paths in `systemd/telepi-gateway.service` if this repo is not at `~/telepi` or Node is not in `~/.nix-profile/bin`. The unit sets a boot-stable runtime `PATH`; Telepi discovers Pi without a login shell across managed/Nix, local, npm, and pnpm user installs. Set `TELEPI_PI_BIN` in `.env` only when an explicit installation must win over that search order:
 
 ```bash
 mkdir -p ~/.config/systemd/user

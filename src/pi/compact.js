@@ -3,7 +3,7 @@ import { existsSync, renameSync, statSync, unlinkSync, writeFileSync } from "nod
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { resolvePiPackageIndex } from "./path.js";
+import { assertSupportedPiSdk, resolvePiPackageIndex } from "./path.js";
 import {
   buildTopicRuntimeSpec,
   createInfrastructureModelRuntime,
@@ -335,6 +335,9 @@ function findSessionFile(sessionDir, sessionId, cwd) {
 }
 
 async function loadPiModule() {
-  piModulePromise ||= import(pathToFileURL(resolvePiPackageIndex()).href);
+  piModulePromise ||= import(pathToFileURL(resolvePiPackageIndex()).href).then((pi) => {
+    assertSupportedPiSdk(pi);
+    return pi;
+  });
   return piModulePromise;
 }
