@@ -97,6 +97,13 @@ export class TelegramClient {
     }));
   }
 
+  async deleteMessage({ chatId, messageId }) {
+    return this.request("deleteMessage", {
+      chat_id: chatId,
+      message_id: messageId,
+    });
+  }
+
   async answerCallbackQuery({ callbackQueryId, text, showAlert }) {
     return this.request("answerCallbackQuery", compact({
       callback_query_id: callbackQueryId,

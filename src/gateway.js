@@ -340,6 +340,8 @@ function startTopicMessage(config, telegram, topic, envelope) {
     displayQueue: Promise.resolve(),
     reasoningDisplayMessage: undefined,
     toolDisplayMessages: new Map(),
+    turnStatus: undefined,
+    turnStatusMessage: undefined,
     ready: undefined,
     readyError: undefined,
     readySettled: false,
@@ -549,6 +551,7 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
   }
   const startedAt = Date.now();
   const stopWorkingIndicator = telegram.startWorkingIndicator(config, topic, envelope);
+  const stopTurnStatus = telegram.startTurnStatus(active, envelope);
   const displayMessages = configuredDisplayMessages(config, topic);
   const useDefaultAssistantDisplay = !hasConfiguredDisplayMessages(config, topic);
   const streamAssistantMessages = useDefaultAssistantDisplay || telegram.isDisplayMessageAllowed(displayMessages, "assistant/message");
@@ -560,9 +563,13 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
         : undefined,
       onEvent: (event) => {
         acknowledgeSteeredEnvelope(active, event);
+        telegram.updateTurnStatusFromPiEvent(active, event);
         telegram.resetReasoningDisplayFromPiEvent(active, event);
         telegram.updateReplyAnchorFromPiEvent(active, event);
-        if (telegram.isDeliveryEvent(event)) active.telegramDeliveryCount += 1;
+        if (telegram.isDeliveryEvent(event)) {
+          active.telegramDeliveryCount += 1;
+          telegram.noteTurnStatusVisibleActivity(active);
+        }
         const modelError = advanceModelError(active.lastModelError, event);
         active.lastModelError = modelError.lastError;
         if (modelError.recoveredError) {
@@ -582,6 +589,7 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
     result = await piRun.promise;
   } finally {
     stopWorkingIndicator();
+    stopTurnStatus();
     active.acceptsSteering = false;
     active.abort = undefined;
     active.steer = undefined;
@@ -805,6 +813,12 @@ function serializePendingQueue(inFlight) {
       displayedMessageCount: run.displayedMessageCount || 0,
       telegramDeliveryCount: run.telegramDeliveryCount || 0,
       lastModelError: run.lastModelError || null,
+      turnStatus: run.turnStatus ? {
+        step: run.turnStatus.state.step,
+        phase: run.turnStatus.state.phase.label,
+        toolsStarted: run.turnStatus.state.toolsStarted,
+        outputTokens: run.turnStatus.state.outputTokens,
+      } : null,
       active: run.envelope,
       pending: (run.pending || []).map(serializeQueueEnvelope),
       steeredAwaitingDelivery: (run.steered || []).map(serializeQueueEnvelope),

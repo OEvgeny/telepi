@@ -8,6 +8,7 @@ import {
   updateToEnvelope,
 } from "./client.js";
 import { blockquoteEntities, italicEntities, toTelegramMarkdownV2 } from "./format.js";
+import { advanceTurnStatus, createTurnStatusState, formatTurnStatus } from "../turn-status.js";
 
 // Concrete in-process Telegram orchestration for the gateway. This module is
 // intentionally not a generalized transport interface; its methods follow the
@@ -15,10 +16,13 @@ import { blockquoteEntities, italicEntities, toTelegramMarkdownV2 } from "./form
 const GATEWAY_TELEGRAM_MIN_INTERVAL_MS = 1000;
 const TOOL_UPDATE_DEBOUNCE_MS = 1000;
 const MAX_GATEWAY_RATE_LIMIT_RETRY_MS = 5000;
+const TURN_STATUS_SILENCE_MS = 60_000;
+const TURN_STATUS_UPDATE_MS = 60_000;
 const GATEWAY_RATE_LIMITED_TELEGRAM_METHODS = new Set([
   "sendMessage",
   "editMessageText",
   "editMessageReplyMarkup",
+  "deleteMessage",
   "setMessageReaction",
   "sendPhoto",
 ]);
@@ -121,7 +125,25 @@ class TelegramAdapter {
     return startWorkingIndicator(this, config, topic, envelope);
   }
 
+  startTurnStatus(active, envelope, options = {}) {
+    return startTurnStatus(this, active, envelope, options);
+  }
+
+  updateTurnStatusFromPiEvent(active, event) {
+    if (!active.turnStatus) return;
+    advanceTurnStatus(active.turnStatus.state, event);
+  }
+
+  noteTurnStatusVisibleActivity(active) {
+    noteTurnStatusVisibleActivity(this, active);
+  }
+
+  stopTurnStatus(active) {
+    stopTurnStatus(this, active);
+  }
+
   queueAssistantTextDisplay(active, envelope, text) {
+    this.noteTurnStatusVisibleActivity(active);
     active.displayQueue = active.displayQueue
       .catch(() => undefined)
       .then(() => sendStreamingText(this, active, envelope, text));
@@ -132,6 +154,7 @@ class TelegramAdapter {
     const excluded = new Set(options.excludeTypes || []);
     const items = displayItemsFromPiEvent(event)
       .filter((item) => !excluded.has(item.type) && isDisplayMessageAllowed(displayMessages, item.type));
+    if (items.length) this.noteTurnStatusVisibleActivity(active);
     for (const item of items) {
       active.displayQueue = active.displayQueue
         .catch(() => undefined)
@@ -653,13 +676,14 @@ function rateLimitDelayMs(error) {
 async function editTelegramMessageText(adapter, message) {
   const text = message.text.length > 3900 ? `${message.text.slice(0, 3890)}\n[truncated]` : message.text;
   const italic = Boolean(message.italic);
-  const converted = italic ? null : toTelegramMarkdownV2(text);
+  const explicitEntities = message.entities;
+  const converted = italic || explicitEntities ? null : toTelegramMarkdownV2(text);
   const payload = {
     chatId: message.chatId,
     messageId: message.messageId,
     text: converted ?? text,
     parseMode: converted ? "MarkdownV2" : undefined,
-    entities: italic ? italicEntities(text) : undefined,
+    entities: explicitEntities || (italic ? italicEntities(text) : undefined),
     replyMarkup: message.replyMarkup,
   };
   try {
@@ -688,6 +712,129 @@ async function setLoggedMessageReaction(telegram, { chatId, topicId, messageId, 
   const result = await telegram.setMessageReaction({ chatId, messageId, emoji });
   console.error(`set reaction chat=${chatId} topic=${topicId || "none"} message=${messageId} agent=${agent || "unknown"} emoji=${emoji || "none"} reason=${reason || "unspecified"}`);
   return result;
+}
+
+function startTurnStatus(adapter, active, envelope, options = {}) {
+  const status = {
+    state: createTurnStatusState(),
+    envelope,
+    silenceMs: Math.max(1, Number(options.silenceMs || TURN_STATUS_SILENCE_MS)),
+    updateMs: Math.max(1, Number(options.updateMs || TURN_STATUS_UPDATE_MS)),
+    pulseIndex: 0,
+    generation: 0,
+    showing: false,
+    stopped: false,
+    timer: undefined,
+  };
+  active.turnStatus = status;
+  armTurnStatus(adapter, active, status, status.silenceMs);
+  return () => stopTurnStatus(adapter, active);
+}
+
+function armTurnStatus(adapter, active, status, delayMs) {
+  clearTimeout(status.timer);
+  status.timer = setTimeout(() => {
+    if (status.stopped || active.turnStatus !== status) return;
+    status.showing = true;
+    const generation = status.generation;
+    queueTurnStatusRender(adapter, active, status, generation);
+    armTurnStatus(adapter, active, status, status.updateMs);
+  }, delayMs);
+  status.timer.unref?.();
+}
+
+function queueTurnStatusRender(adapter, active, status, generation) {
+  active.displayQueue = active.displayQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (
+        status.stopped
+        || !status.showing
+        || status.generation !== generation
+        || active.turnStatus !== status
+      ) return;
+      const text = formatTurnStatus(status.state, { pulseIndex: status.pulseIndex++ });
+      const entities = preEntities(text);
+      const existing = active.turnStatusMessage;
+      if (existing) {
+        await editTelegramMessageText(adapter, {
+          chatId: existing.chatId,
+          messageId: existing.messageId,
+          text,
+          entities,
+        });
+        existing.text = text;
+        return;
+      }
+      const sent = await sendMessageWithRateLimitRetry(adapter.client, {
+        chatId: status.envelope.chatId,
+        topicId: status.envelope.topicId,
+        text,
+        entities,
+      });
+      if (!sent?.message_id) return;
+      if (
+        status.stopped
+        || !status.showing
+        || status.generation !== generation
+        || active.turnStatus !== status
+      ) {
+        await adapter.client.deleteMessage({
+          chatId: String(sent.chat?.id || status.envelope.chatId),
+          messageId: String(sent.message_id),
+        }).catch(() => undefined);
+        return;
+      }
+      active.turnStatusMessage = {
+        chatId: String(sent.chat?.id || status.envelope.chatId),
+        messageId: String(sent.message_id),
+        text,
+      };
+      adapter.recordSentMessages({
+        chatId: status.envelope.chatId,
+        topicId: status.envelope.topicId,
+        text,
+      }, [sent]);
+    });
+}
+
+function noteTurnStatusVisibleActivity(adapter, active) {
+  const status = active.turnStatus;
+  if (!status || status.stopped) return;
+  status.generation += 1;
+  status.showing = false;
+  queueTurnStatusRemoval(adapter, active);
+  armTurnStatus(adapter, active, status, status.silenceMs);
+}
+
+function stopTurnStatus(adapter, active) {
+  const status = active.turnStatus;
+  if (!status) return;
+  status.stopped = true;
+  status.showing = false;
+  status.generation += 1;
+  clearTimeout(status.timer);
+  active.turnStatus = undefined;
+  queueTurnStatusRemoval(adapter, active);
+}
+
+function queueTurnStatusRemoval(adapter, active) {
+  const existing = active.turnStatusMessage;
+  if (!existing) return;
+  active.turnStatusMessage = undefined;
+  active.displayQueue = active.displayQueue
+    .catch(() => undefined)
+    .then(() => adapter.client.deleteMessage({
+      chatId: existing.chatId,
+      messageId: existing.messageId,
+    }))
+    .catch((error) => {
+      if (!/message to delete not found|message_id_invalid/i.test(error.message)) throw error;
+    });
+}
+
+function preEntities(text) {
+  return [{ type: "pre", offset: 0, length: String(text).length }];
 }
 
 function startWorkingIndicator(adapter, config, topic, envelope) {
