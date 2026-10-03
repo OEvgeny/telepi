@@ -33,9 +33,9 @@ test("turn status renders current and previous model steps from Pi events", () =
   }, 8_000);
 
   assert.equal(formatTurnStatus(state, { now: 50_000, pulseIndex: 2 }), [
-    "◑ Step 2 · 1 tool · 5.8k tok",
-    "▶ Reasoning · 42s",
-    "↳ Bash ✓ · 3s",
+    "◑ Step 2 · ⚒ 1 · 5.8k tok",
+    "→ Reasoning · 42s",
+    "← Bash ✓ · 3s",
   ].join("\n"));
 });
 
@@ -77,8 +77,8 @@ test("turn status counts parallel tools once and reports failed previous work", 
   assert.equal(state.toolsStarted, 2);
   assert.equal(state.previous.label, "Bash + Read ⚠1");
   assert.equal(formatTurnStatus(state, { now: 5_000, pulseIndex: 3 }), [
-    "◒ Step 4 · 2 tools · 0 tok",
-    "▶ Continuing · 1s",
-    "↳ Bash + Read ⚠1 · 2s",
+    "◒ Step 4 · ⚒ 2 · 0 tok",
+    "→ Continuing · 1s",
+    "← Bash + Read ⚠1 · 2s",
   ].join("\n"));
 });

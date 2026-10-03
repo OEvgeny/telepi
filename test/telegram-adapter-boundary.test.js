@@ -77,7 +77,7 @@ test("silent turn status uses one native preformatted Telegram message", async (
 
   await waitFor(() => calls.some((call) => call.method === "sendMessage"));
   const sent = calls.find((call) => call.method === "sendMessage");
-  assert.match(sent.payload.text, /^◐ Step 3 · 0 tools · 0 tok\n▶ Reasoning · /);
+  assert.match(sent.payload.text, /^◐ Step 3 · ⚒ 0 · 0 tok\n→ Reasoning · /);
   assert.deepEqual(sent.payload.entities, [{
     type: "pre",
     offset: 0,

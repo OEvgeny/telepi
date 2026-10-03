@@ -107,15 +107,14 @@ export function advanceTurnStatus(state, event, now = Date.now()) {
 
 export function formatTurnStatus(state, { now = Date.now(), pulseIndex = 0 } = {}) {
   const pulse = PULSE_FRAMES[positiveModulo(pulseIndex, PULSE_FRAMES.length)];
-  const toolWord = state.toolsStarted === 1 ? "tool" : "tools";
   const currentDuration = formatDuration(Math.max(0, now - state.phase.startedAt));
   const previous = state.previous
     ? `${state.previous.label} · ${formatDuration(state.previous.durationMs)}`
     : "No completed step";
   return [
-    `${pulse} Step ${state.step} · ${state.toolsStarted} ${toolWord} · ${formatTokenCount(state.outputTokens)} tok`,
-    `▶ ${state.phase.label} · ${currentDuration}`,
-    `↳ ${previous}`,
+    `${pulse} Step ${state.step} · ⚒ ${state.toolsStarted} · ${formatTokenCount(state.outputTokens)} tok`,
+    `→ ${state.phase.label} · ${currentDuration}`,
+    `← ${previous}`,
   ].join("\n");
 }
 
