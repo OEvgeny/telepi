@@ -19,7 +19,6 @@ import { acceptSdkRpcConnection, startPiForTopic } from "./pi/sdk-driver.js";
 import { acknowledgeTopicMessageDelivery, topicMessageDeliveryId } from "./pi/topic-spec.js";
 import { installTimestampedConsole } from "./logging.js";
 import { isStopCommand, requestTurnStop } from "./turn-control.js";
-import { formatPreservedPromptTimeoutNotice, isRpcPromptResponseTimeout } from "./session-safety.js";
 
 installTimestampedConsole();
 
@@ -574,18 +573,6 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
       topicId: envelope.topicId,
       replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
       text: `Stopped ${topic.name}.`,
-      quote: true,
-    });
-    return;
-  }
-  if (isRpcPromptResponseTimeout(result)) {
-    const sessionId = resolveTopicSession(config, topic).id;
-    console.error(`rpc prompt response timeout chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} session=${sessionId}; session preserved and prompt not retried`);
-    await sendLongMessage(telegram, {
-      chatId: envelope.chatId,
-      topicId: envelope.topicId,
-      replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
-      text: formatPreservedPromptTimeoutNotice(topic.name, sessionId),
       quote: true,
     });
     return;

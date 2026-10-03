@@ -4,30 +4,12 @@ import test from "node:test";
 
 import {
   formatFreshSessionSwitchNotice,
-  formatPreservedPromptTimeoutNotice,
   formatRestoredSessionSwitchNotice,
-  isRpcPromptResponseTimeout,
 } from "../src/session-safety.js";
 
-test("RPC prompt response timeouts preserve the current downstream session", async () => {
-  assert.equal(isRpcPromptResponseTimeout({
-    ok: false,
-    code: 1,
-    stderr: "Timeout waiting for response to prompt. Stderr: ",
-  }), true);
-  assert.equal(isRpcPromptResponseTimeout({
-    ok: false,
-    code: 1,
-    stderr: "Timeout waiting for response to steer. Stderr: ",
-  }), false);
-
+test("gateway never unlinks or retries a session after an RPC prompt delay", async () => {
   const gateway = await readFile(new URL("../src/gateway.js", import.meta.url), "utf8");
   assert.doesNotMatch(gateway, /session:unlink|auto-rpc-timeout-retry|recovered rpc prompt timeout/i);
-  assert.match(gateway, /session preserved and prompt not retried/);
-
-  const notice = formatPreservedPromptTimeoutNotice("Example", "example-session");
-  assert.match(notice, /existing downstream session \(example-session\) was preserved/i);
-  assert.match(notice, /did not create a fresh session or retry/i);
 });
 
 test("fresh and restored session switches explain their context boundary", () => {
