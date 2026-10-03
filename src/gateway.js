@@ -454,6 +454,11 @@ function setLoggedMessageReaction(telegram, details) {
 }
 
 async function steerRunningTopic(config, telegram, inFlight, topic, envelope, active) {
+  if (active.stopRequested) {
+    await queueEnvelopeForRun(config, telegram, inFlight, topic, active, envelope);
+    return "queued";
+  }
+
   const compactInstructions = parseCompactCommand(envelope.text);
   if (compactInstructions !== null) {
     await sendLongMessage(telegram, {
@@ -482,6 +487,7 @@ async function steerRunningTopic(config, telegram, inFlight, topic, envelope, ac
   try {
     await active.ready;
     if (active.readyError) throw active.readyError;
+    if (active.stopRequested) throw new Error("topic is stopping");
     if (!active.acceptsSteering || !active.steer) throw new Error("topic is not accepting steering");
     active.steered.push(hydratedEnvelope);
     markPendingQueueDirty();

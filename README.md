@@ -121,7 +121,7 @@ npm run telepi -- topic:prompt --topic Helper --text "..." [--no-echo] [--from "
 The gateway also owns a few Telegram slash commands directly:
 
 - `/help` — show gateway-owned commands.
-- `/stop` — stop the current turn in that topic without sending another prompt to the agent. This is the sole active-turn stop control; streamed messages do not carry a Cancel keyboard.
+- `/stop` — stop the current turn in that topic without sending another prompt to the agent. This clears steers already queued inside that turn, prevents newer messages from steering into the stopping worker, and bounds graceful Pi shutdown before terminating that per-message worker. It is the sole active-turn stop control; streamed messages do not carry a Cancel keyboard.
 - `/compact [instructions]` — compact the current topic's pi session.
 - `/retry` — rerun the last non-command prompt remembered for that chat/topic.
 

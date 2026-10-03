@@ -20,6 +20,7 @@ test("turn stop waits until abort is ready and marks the stop request", async ()
     }),
     readyError: undefined,
     stopRequested: false,
+    steered: [{ messageId: "queued-steer" }],
     abort: async () => {
       aborted = true;
     },
@@ -33,6 +34,7 @@ test("turn stop waits until abort is ready and marks the stop request", async ()
   assert.equal(await stopping, "requested");
   assert.equal(aborted, true);
   assert.equal(active.stopRequested, true);
+  assert.deepEqual(active.steered, []);
   assert.equal(await requestTurnStop(active), "stopping");
 });
 
@@ -50,10 +52,12 @@ test("turn stop handles idle, unavailable, and failed stop requests", async () =
     ready: Promise.resolve(),
     readyError: undefined,
     stopRequested: false,
+    steered: [{ messageId: "preserve-on-failure" }],
     abort: async () => {
       throw failure;
     },
   };
   await assert.rejects(requestTurnStop(active), failure);
   assert.equal(active.stopRequested, false);
+  assert.deepEqual(active.steered, [{ messageId: "preserve-on-failure" }]);
 });

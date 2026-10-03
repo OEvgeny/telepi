@@ -180,8 +180,14 @@ class BrokerRpcClient {
     return this.send({ type: "steer", message, images });
   }
 
-  abort() {
-    return this.send({ type: "abort" });
+  async abort() {
+    // Pi 0.85's abort waits for the whole session to become idle before it
+    // responds. Clear queued steers first so aborting the current model/tool
+    // operation cannot immediately continue into older steering work, then
+    // report transport acceptance instead of mistaking slow settlement for a
+    // failed stop.
+    await this.sendAccepted({ type: "clear_queue" });
+    await this.sendAccepted({ type: "abort" });
   }
 
   async stop() {
@@ -243,16 +249,39 @@ class BrokerRpcClient {
           rejectPromise(error);
         },
       });
-      this.peer.send({
-        version: BROKER_PROTOCOL_VERSION,
-        type: "pi_rpc",
-        runId: this.runId,
-        body: { ...command, id },
-      }).catch((error) => {
+      this.sendFrame(command, id).catch((error) => {
         const pending = this.pendingRequests.get(id);
         this.pendingRequests.delete(id);
         pending?.reject(error);
       });
+    });
+  }
+
+  async sendAccepted(command) {
+    if (!this.started || !this.peer) throw new Error("Client not started");
+    if (this.exitError) throw this.exitError;
+    const id = `req_${++this.requestId}`;
+    // Consume a later correlated response without making transport acceptance
+    // wait for command completion. stop() rejects this observer harmlessly if
+    // the worker settles and is closed before Pi writes the response.
+    this.pendingRequests.set(id, {
+      resolve: () => undefined,
+      reject: () => undefined,
+    });
+    try {
+      await this.sendFrame(command, id);
+    } catch (error) {
+      this.pendingRequests.delete(id);
+      throw error;
+    }
+  }
+
+  sendFrame(command, id) {
+    return this.peer.send({
+      version: BROKER_PROTOCOL_VERSION,
+      type: "pi_rpc",
+      runId: this.runId,
+      body: { ...command, id },
     });
   }
 

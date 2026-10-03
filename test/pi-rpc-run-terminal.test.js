@@ -8,7 +8,7 @@ const message = (role, content, stopReason) => ({
   message: { role, content, stopReason },
 });
 
-test("RPC shutdown waits for an accepted control response", async () => {
+test("RPC shutdown waits for a pending control operation", async () => {
   const tracker = createPendingControlTracker();
   let release;
   const control = tracker.track(() => new Promise((resolve) => {

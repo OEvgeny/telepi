@@ -106,3 +106,50 @@ test("RPC run delivers intermediate assistant messages before the final answer",
   assert.equal(result.ok, true);
   assert.equal(stopped, true);
 });
+
+test("RPC abort force-settles a worker that accepts abort but never becomes idle", async () => {
+  let listener;
+  let abortAccepted = false;
+  let stopped = false;
+  const client = {
+    async start() {},
+    onEvent(callback) {
+      listener = callback;
+      return () => {
+        listener = undefined;
+      };
+    },
+    async prompt() {},
+    async abort() {
+      abortAccepted = true;
+    },
+    async steer() {},
+    async stop() {
+      stopped = true;
+    },
+    getStderr() {
+      return "";
+    },
+  };
+
+  const run = await startRpcRun([], {
+    workerPath: "/tmp/telepi-test-worker.js",
+    cwd: process.cwd(),
+    idleTimeoutMs: 0,
+    hardTimeoutMs: 0,
+    initialMessage: "Start",
+    steerMessage: (message) => message,
+    sessionDir: "/tmp/telepi-test-missing-sessions",
+    sessionId: "missing",
+    createRpcClient: () => client,
+    abortGraceMs: 10,
+  });
+
+  await run.abort();
+  assert.equal(abortAccepted, true);
+  const result = await run.promise;
+
+  assert.equal(result.ok, true);
+  assert.equal(stopped, true);
+  assert.equal(listener, undefined);
+});

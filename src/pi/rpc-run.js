@@ -16,6 +16,7 @@ export async function startRpcRun(args, {
   sessionDir,
   sessionId,
   createRpcClient,
+  abortGraceMs = 5_000,
 }) {
   // Capture the pre-prompt byte boundary. Pi persists messages before all RPC
   // lifecycle events have necessarily escaped the process, so the transcript
@@ -32,6 +33,8 @@ export async function startRpcRun(args, {
 
   let unsubscribe;
   let terminalSettleTimer;
+  let abortSettleTimer;
+  let requestAbort;
   const controlTracker = createPendingControlTracker();
   const promise = new Promise((resolvePromise) => {
     const outputCollector = createAssistantOutputCollector();
@@ -81,9 +84,9 @@ export async function startRpcRun(args, {
       settled = true;
       cleanup();
       await textQueue;
-      // Pi can emit agent_settled before the RPC response to the abort command
-      // that caused it. Do not terminate the worker under an accepted control
-      // request; let its correlated response reach RpcClient first.
+      // Steering still waits for its correlated response. Abort instead
+      // resolves when its clear_queue and abort frames have been accepted by
+      // the transport, so a slow Pi waitForIdle() cannot hold shutdown open.
       await controlTracker.wait();
       if (textDeliveryError) {
         result.stderr = `${result.stderr ? `${result.stderr}\n` : ""}Streaming text delivery failed: ${textDeliveryError}`;
@@ -96,10 +99,31 @@ export async function startRpcRun(args, {
       clearTimeout(idleTimer);
       clearTimeout(hardTimer);
       clearTimeout(terminalSettleTimer);
+      clearTimeout(abortSettleTimer);
       clearInterval(transcriptTimer);
       unsubscribe?.();
       unsubscribe = undefined;
     };
+
+    requestAbort = () => controlTracker.track(async () => {
+      await client.abort();
+      if (settled) return;
+      clearTimeout(abortSettleTimer);
+      // Pi 0.85 can abort the provider call and then enter auto-compaction, or
+      // wait indefinitely for a tool/extension before replying. A Telegram
+      // stop owns the worker lifecycle, so bound graceful settlement and close
+      // this run if native RPC does not emit agent_settled promptly.
+      abortSettleTimer = setTimeout(() => {
+        console.error(`pi did not settle within ${abortGraceMs}ms of abort acceptance; stopping worker`);
+        void finish({
+          ok: true,
+          code: 0,
+          stdout: outputCollector.text() || terminalTranscriptText,
+          stderr: client.getStderr().trim(),
+          streamedTextCount,
+        });
+      }, Math.max(0, abortGraceMs));
+    });
 
     const enqueueText = (text) => {
       const normalized = String(text || "").trim();
@@ -211,7 +235,7 @@ export async function startRpcRun(args, {
 
   return {
     promise,
-    abort: () => controlTracker.track(() => client.abort()),
+    abort: () => requestAbort(),
     steer: (envelope) => controlTracker.track(() => client.steer(steerMessage(envelope))),
   };
 }

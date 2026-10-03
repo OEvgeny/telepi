@@ -23,12 +23,16 @@ process.stdin.on("data", (chunk) => {
     if (newline < 0) break;
     const command = JSON.parse(buffer.slice(0, newline).replace(/\\r$/, ""));
     buffer = buffer.slice(newline + 1);
-    process.stdout.write(JSON.stringify({
-      id: command.id,
-      type: "response",
-      command: command.type,
-      success: true,
-    }) + "\\n");
+    // Pi 0.85 acknowledges abort only after the whole session is idle. Leave
+    // that response pending to prove Telepi treats a written abort as accepted.
+    if (command.type !== "abort") {
+      process.stdout.write(JSON.stringify({
+        id: command.id,
+        type: "response",
+        command: command.type,
+        success: true,
+      }) + "\\n");
+    }
     process.stdout.write(JSON.stringify({
       type: "transport_probe",
       command: command.type,
@@ -65,11 +69,12 @@ process.stdin.on("data", (chunk) => {
   await client.prompt("line one\nline two \u2028 привет");
   await client.steer("change course");
   await client.abort();
-  await waitFor(() => events.length === 3);
+  await waitFor(() => events.length === 4);
 
   assert.deepEqual(events, [
     { type: "transport_probe", command: "prompt", message: "line one\nline two \u2028 привет" },
     { type: "transport_probe", command: "steer", message: "change course" },
+    { type: "transport_probe", command: "clear_queue" },
     { type: "transport_probe", command: "abort" },
   ]);
   assert.match(client.getStderr(), /worker diagnostic/);
