@@ -1,6 +1,7 @@
 import { closeSync, mkdirSync, openSync, readSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getAgent, resolvePath, resolveTopicModel, resolveTopicSession } from "../config.js";
+import { applyHttpProxySettings, configurePiHttpDispatcher } from "./http-dispatcher.js";
 
 const MODEL_OPERATION_TIMEOUT_MS = 15_000;
 
@@ -55,6 +56,8 @@ export async function createTopicRuntime(pi, config, topic, options = {}) {
     const diagnostics = [];
     const projectTrusted = resolveProjectTrust(pi, cwd, spec.infrastructureAgentDir, diagnostics);
     const settingsManager = pi.SettingsManager.create(cwd, agentDir, { projectTrusted });
+    applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
+    configurePiHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
     const modelRuntime = await createInfrastructureModelRuntime(pi, spec.infrastructureAgentDir);
     const services = await pi.createAgentSessionServices({
       cwd,
