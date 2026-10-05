@@ -13,20 +13,28 @@ import {
 
 let piModulePromise;
 
-// Skills, AGENTS.md, and other files read during a session leave stale copies
-// in the transcript, and a default compaction bakes their contents into the
-// summary as facts. The instructions keep file-sourced facts out of the
-// summary; the post-compaction notice makes the agent re-read files instead
-// of trusting pre-compaction memory. Together a compacted session behaves
-// like a fresh one with preserved conversational context. (Verified against
-// the local model: instructions alone are not enough — the notice is the
-// load-bearing part.)
+// Repeated Pi summaries can grow until the previous summary alone is near the
+// next summary's output cap. Ask the model to rebuild and consolidate instead
+// of mechanically extending it. Skills, AGENTS.md, and other files read during
+// a session also leave stale copies in the transcript, so keep file-sourced
+// facts out of the summary; the post-compaction notice makes the agent re-read
+// files instead of trusting pre-compaction memory. Together a compacted session
+// behaves like a fresh one with bounded conversational context. (Verified
+// against the local model: instructions alone are not enough for freshness —
+// the notice is the load-bearing part.)
 const FRESHNESS_INSTRUCTIONS =
+  "Produce a replacement checkpoint of at most 4,000 output tokens. Aggressively " +
+  "consolidate the previous summary rather than preserving its wording or every " +
+  "bullet. Preserve only current goals, user requirements, material decisions, " +
+  "current state, unresolved issues, and facts needed for the next work. Omit " +
+  "obsolete or superseded details, completed low-level implementation history, " +
+  "commands, tool output, repeated facts, and file-by-file recaps. Do not enumerate " +
+  "general read or modified files; Pi appends those lists separately. " +
   "Do NOT copy facts, rules, or instructions that came from skill files, AGENTS.md, " +
   "or other documentation files into the summary. Those files may change on disk " +
-  "and will be re-read; instead, list which skills/files were consulted and for " +
-  "what purpose. Only preserve facts produced by the conversation itself " +
-  "(user decisions, work performed, results).";
+  "and will be re-read; only name the skill/document paths that must be re-read and " +
+  "their purpose, without copying their contents. Preserve conversational facts " +
+  "such as user decisions, material work performed, and results.";
 
 const COMPACTION_NOTICE =
   "This session was just compacted. Any skill files, AGENTS.md, or other files read " +
@@ -96,9 +104,7 @@ export async function compactPiSession(config, topic, instructions, options = {}
       settingsManager,
     }));
   }
-  const combinedInstructions = instructions
-    ? `${instructions}\n\n${FRESHNESS_INSTRUCTIONS}`
-    : FRESHNESS_INSTRUCTIONS;
+  const combinedInstructions = buildCompactionInstructions(instructions);
   try {
     const result = await session.compact(combinedInstructions);
     sessionManager.appendCustomMessageEntry("telepi-compaction-notice", [
@@ -123,6 +129,12 @@ export async function compactPiSession(config, topic, instructions, options = {}
   } finally {
     session.dispose?.();
   }
+}
+
+export function buildCompactionInstructions(instructions) {
+  return instructions
+    ? `${instructions}\n\n${FRESHNESS_INSTRUCTIONS}`
+    : FRESHNESS_INSTRUCTIONS;
 }
 
 export function hasMeaningfulEntriesAfterLatestCompaction(branch) {

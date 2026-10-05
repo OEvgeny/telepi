@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { createCompactionCheckpoint, hasMeaningfulEntriesAfterLatestCompaction } from "../src/pi/compact.js";
+import {
+  buildCompactionInstructions,
+  createCompactionCheckpoint,
+  hasMeaningfulEntriesAfterLatestCompaction,
+} from "../src/pi/compact.js";
 import { resolvePiPackageIndex } from "../src/pi/path.js";
 
 const pi = await import(pathToFileURL(resolvePiPackageIndex()).href);
@@ -21,6 +25,14 @@ const usage = {
 function assistant(content, stopReason = "stop", timestamp = Date.now()) {
   return { role: "assistant", content, api: "test", provider: "test", model: "test", usage, stopReason, timestamp };
 }
+
+test("compaction instructions bound repeated summaries and preserve user focus", () => {
+  const instructions = buildCompactionInstructions("Prioritize the current UI bug.");
+  assert.match(instructions, /^Prioritize the current UI bug\./);
+  assert.match(instructions, /at most 4,000 output tokens/);
+  assert.match(instructions, /consolidate the previous summary/);
+  assert.match(instructions, /skill files, AGENTS\.md/);
+});
 
 test("a compaction freshness notice does not make the session compactable again", () => {
   const compaction = { type: "compaction", id: "compact", parentId: "answer" };
