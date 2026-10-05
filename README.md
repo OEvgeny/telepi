@@ -34,7 +34,7 @@ session:
 
 For these sessions, the entity root is Pi's agent home and `session.location.cwd` is the project working directory. Stable identity and agent-wide instructions belong in `<entity-root>/AGENTS.md`; other agent-home resources use Pi's normal layout directly under that root (`settings.json`, `extensions/`, `skills/`). A different location may provide its own project `AGENTS.md` and `.pi/` resources. Host-global Pi settings and resources are omitted, while shared `auth.json`, `models.json`, and `models-store.json` remain infrastructure. Existing mappings with only `session_id` stay in legacy mode for backward compatibility.
 
-Pi's SDK remains inside the fresh worker rather than the long-running gateway, so Pi upgrades cannot leave a stale model/runtime catalog cached in the service process.
+For ordinary topics, Pi's SDK remains inside the fresh worker rather than the long-running gateway, so Pi upgrades cannot leave a stale model/runtime catalog cached in the service process. Experimental Durable topics run in one separately spawned host child; the gateway itself still does not import the agent runtime.
 
 ## Commands
 
@@ -79,6 +79,15 @@ npm run telepi -- topic:set-model --name Helper --model <provider/model>:high
 ```
 
 Supported levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max` (subject to model support).
+
+Opt one topic into the experimental Durable host, or switch it back to the ordinary Pi worker backend:
+
+```bash
+npm run telepi -- topic:set-backend --name Helper --backend durable
+npm run telepi -- topic:set-backend --name Helper --backend pi
+```
+
+The first Durable prompt creates a fresh ownerless conversation in `.telepi/durable-host/telepi.sqlite`; it never imports, rewrites, or deletes the topic's JSONL history. The gateway starts one locked multi-conversation host child only when an enabled topic is opted in. Durable currently reuses Pi's model/settings/context/skill services plus Durable's coding tools and activity events. It is a pilot backend: semantic outbox receipts, Telegram-specific tools, full extension parity, automatic compaction policy hooks, and resource governors remain migration gates, so no topic is opted in by default.
 
 Start a topic with a fresh pi session without deleting old transcript files:
 

@@ -7,9 +7,11 @@ import { pathToFileURL } from "node:url";
 import {
   createTopicSessionConfig,
   findTopicByName,
+  getAgent,
   getBotToken,
   readConfig,
   resolvePath,
+  resolveTopicModel,
   resolveTopicSession,
   resolveUser,
   resolveConfigPath,
@@ -20,6 +22,8 @@ import {
 import { TelegramClient, normalizeTopicColor, resolveForumTopicIcon } from "../src/telegram/client.js";
 import { blockquoteEntities, toTelegramMarkdownV2 } from "../src/telegram/format.js";
 import { BROKER_PROTOCOL_VERSION, requestBroker, resolveBrokerSocketPath } from "../src/broker-ipc.js";
+import { assertDurablePackageVersions } from "../src/durable/packages.js";
+import { TOPIC_BACKENDS, isDurableTopic, resolveTopicBackend } from "../src/durable/topic.js";
 import { buildPiCliSpec } from "../src/pi/cli-command.js";
 import { assertSupportedPiSdk, resolvePiCliPath, resolvePiPackageIndex } from "../src/pi/path.js";
 import {
@@ -47,11 +51,30 @@ program
     } catch (error) {
       errors.push(`pi installation: ${error.message}`);
     }
+    try {
+      assertDurablePackageVersions();
+    } catch (error) {
+      errors.push(`durable installation: ${error.message}`);
+    }
     if (errors.length) {
       for (const error of errors) console.error(`error: ${error}`);
       process.exit(1);
     }
     console.log(`ok: ${config.topics.length} topic(s), ${Object.keys(config.agents).length} agent(s)`);
+  });
+
+program
+  .command("gateway:drain")
+  .description("Stop Durable admission, wait for Durable work to become idle, and close its host child")
+  .action(async () => {
+    const config = load();
+    const request = {
+      version: BROKER_PROTOCOL_VERSION,
+      type: "durable_host_drain",
+      id: `drain:${randomUUID()}`,
+    };
+    await requestBroker(resolveBrokerSocketPath(config), request, { timeoutMs: 0 });
+    console.log("durable host closed");
   });
 
 program
@@ -73,7 +96,7 @@ program
       const owner = topic.owner ? `\towner=${topic.owner}` : "";
       const session = resolveTopicSession(config, topic);
       const location = session.location ? `\tcwd=${session.location.cwd}` : "\tmode=legacy";
-      console.log(`${topic.name}\tchat=${topic.chat_id}\ttopic=${topic.topic_id}\tagent=${topic.agent}\tsession=${session.id}${location}${owner}`);
+      console.log(`${topic.name}\tchat=${topic.chat_id}\ttopic=${topic.topic_id}\tagent=${topic.agent}\tbackend=${resolveTopicBackend(topic)}\tsession=${session.id}${location}${owner}`);
     }
   });
 
@@ -378,6 +401,34 @@ program
   });
 
 program
+  .command("topic:set-backend")
+  .description("Select the execution backend for one topic")
+  .requiredOption("--name <name>", "Existing mapping name")
+  .requiredOption("--backend <pi|durable>", "Execution backend")
+  .action(async (options) => {
+    const config = load();
+    const topic = findTopicByName(config, options.name);
+    if (!topic) throwCli(`unknown topic mapping: ${options.name}`);
+    const backend = String(options.backend).trim().toLowerCase();
+    if (!TOPIC_BACKENDS.has(backend)) throwCli(`invalid backend: ${options.backend}; expected pi or durable`);
+    if (backend === "durable" && !resolveTopicModel(config, topic, getAgent(config, topic.agent))) {
+      throwCli(`durable topic ${topic.name} requires a configured model`);
+    }
+    const previous = resolveTopicBackend(topic);
+    if (backend === "pi") delete topic.backend;
+    else topic.backend = backend;
+    save(config);
+    if (previous !== backend) {
+      const sessionId = resolveTopicSession(config, topic).id;
+      const text = backend === "durable"
+        ? `Execution backend changed for ${topic.name}: Durable. Its Durable conversation is separate; Pi session ${sessionId} remains preserved and is not imported.`
+        : `Execution backend changed for ${topic.name}: Pi. The mapped Pi session ${sessionId} is active again; Durable history remains preserved separately.`;
+      await notifyTopicBestEffort(config, topic, text);
+    }
+    console.log(`updated ${topic.name} backend -> ${backend}`);
+  });
+
+program
   .command("topic:send")
   .description("Send a direct Telegram message to a mapped topic without invoking pi or the gateway")
   .option("--topic <name>", "Existing topic mapping name")
@@ -393,6 +444,9 @@ program
     if (topic.enabled === false) throwCli(`topic is disabled: ${topic.name}`);
     const text = promptText(options);
     if (!text.trim()) throwCli("missing --text or non-empty --stdin");
+    if (options.record && isDurableTopic(topic)) {
+      throwCli("topic:send cannot record into a Durable conversation yet; use --no-record or topic:prompt");
+    }
 
     const telegram = new TelegramClient(getBotToken(config));
     const sentMessages = await sendCliLongMessage(telegram, {
@@ -572,6 +626,7 @@ program
     const config = load();
     const topic = findTopicByName(config, options.topic);
     if (!topic) throwCli(`unknown topic mapping: ${options.topic}`);
+    if (isDurableTopic(topic)) throwCli("session:compact is for Pi JSONL sessions; send /compact to a Durable topic");
     let result;
     try {
       result = await compactPiSession(config, topic, options.instructions, {
@@ -812,6 +867,11 @@ function validateConfig(config) {
     }
     if (topic.session && topic.session_id) {
       errors.push(`topic ${topic.name} defines both session and legacy session_id`);
+    }
+    if (!TOPIC_BACKENDS.has(resolveTopicBackend(topic))) {
+      errors.push(`topic ${topic.name} has invalid backend ${topic.backend}`);
+    } else if (resolveTopicBackend(topic) === "durable" && !resolveTopicModel(config, topic, config.agents[topic.agent])) {
+      errors.push(`durable topic ${topic.name} requires a configured model`);
     }
     try {
       if (!resolveTopicSession(config, topic).id) errors.push(`topic ${topic.name} missing session id`);

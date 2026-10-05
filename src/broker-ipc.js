@@ -82,9 +82,11 @@ export async function requestBroker(socketPath, request, {
       else resolvePromise(value);
     };
     const onAbort = () => finish(signal?.reason instanceof Error ? signal.reason : new Error("Broker request cancelled"));
-    const timeout = setTimeout(() => {
-      finish(new Error(`Timed out waiting for Telepi broker after ${timeoutMs}ms`));
-    }, timeoutMs);
+    const timeout = timeoutMs > 0
+      ? setTimeout(() => {
+          finish(new Error(`Timed out waiting for Telepi broker after ${timeoutMs}ms`));
+        }, timeoutMs)
+      : undefined;
 
     signal?.addEventListener("abort", onAbort, { once: true });
     socket.once("connect", () => {

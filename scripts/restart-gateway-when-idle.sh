@@ -29,9 +29,12 @@ if [[ "$FORCE" == true ]]; then
   exit 0
 fi
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 started_at=$(date +%s)
 idle_since=""
 last_workers=""
+durable_drain_requested=false
 
 while true; do
   main_pid="$("$SYSTEMCTL_BIN" --user show "$SERVICE" -p MainPID --value)"
@@ -43,6 +46,26 @@ while true; do
   fi
 
   workers="$(awk -v main="$main_pid" '$1 != main { print $1 }' "$cgroup_procs" | sort -n | tr '\n' ' ' | sed 's/ $//')"
+  if [[ "$durable_drain_requested" == false && -n "$workers" ]]; then
+    durable_workers=""
+    for pid in $workers; do
+      if [[ -r "/proc/$pid/cmdline" ]]; then
+        cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline")"
+        if [[ "$cmdline" == *'/src/durable/host.js'* ]]; then
+          durable_workers+="${durable_workers:+ }$pid"
+        fi
+      fi
+    done
+    if [[ -n "$durable_workers" ]]; then
+      echo "asking Durable host to drain and close: $durable_workers" >&2
+      if ! (cd "$ROOT" && node bin/telepi.js gateway:drain); then
+        echo "Durable host drain failed; no restart attempted" >&2
+        exit 1
+      fi
+      durable_drain_requested=true
+      continue
+    fi
+  fi
   now=$(date +%s)
   if [[ -z "$workers" ]]; then
     if [[ -z "$idle_since" ]]; then

@@ -13,7 +13,22 @@ import {
   normalizeBrokerSubmitRequest,
   resolveBrokerTarget,
 } from "./broker-message.js";
-import { resolveBrokerSocketPath, startBrokerIpcServer } from "./broker-ipc.js";
+import { BROKER_PROTOCOL_VERSION, resolveBrokerSocketPath, startBrokerIpcServer } from "./broker-ipc.js";
+import { DurableDriver } from "./durable/driver.js";
+import {
+  abortDurableTopic,
+  compactDurableTopic,
+  durableEventToPiEvents,
+  runDurableTopic,
+} from "./durable/gateway-run.js";
+import {
+  buildDurableEndpointSpec,
+  durableEndpointKey,
+  hasEnabledDurableTopics,
+  isDurableTopic,
+  resolveInfrastructureAgentDir,
+  resolveTopicBackend,
+} from "./durable/topic.js";
 import { normalizePromptInboxInterval, startPromptInboxPolling } from "./prompt-inbox.js";
 import { acceptSdkRpcConnection, startPiForTopic } from "./pi/sdk-driver.js";
 import { resolvePiCliPath, resolvePiPackageIndex } from "./pi/path.js";
@@ -31,6 +46,7 @@ const configPath = process.argv.includes("--config")
 
 const lastPromptByTopic = new Map();
 let queuePersistence;
+let durableDriver;
 
 async function main() {
   const piCliPath = resolvePiCliPath();
@@ -42,8 +58,25 @@ async function main() {
   const config = getConfig();
   const telegram = await createTelegramAdapter(config);
   const inFlight = new Map();
+  const socketPath = resolveBrokerSocketPath(config);
+  durableDriver = new DurableDriver({
+    socketPath,
+    storageDir: resolve(config.project.root, ".telepi/durable-host"),
+    projectRoot: config.project.root,
+    infrastructureAgentDir: resolveInfrastructureAgentDir(),
+    telegramTokenEnv: config.telegram.bot_token_env,
+  });
+  durableDriver.onEvent((event, data) => handleDurableDriverEvent(getConfig, telegram, inFlight, event, data));
   initPendingQueuePersistence(config, inFlight);
-  await startBrokerApi(getConfig, telegram, inFlight);
+  await startBrokerApi(getConfig, telegram, inFlight, socketPath);
+  if (hasEnabledDurableTopics(config)) {
+    await durableDriver.init();
+    for (const topic of config.topics.filter((entry) => entry.enabled !== false && isDurableTopic(entry))) {
+      await durableDriver.ensureEndpoint(buildDurableEndpointSpec(config, topic, {
+        infrastructureAgentDir: durableDriver.infrastructureAgentDir,
+      }));
+    }
+  }
   startConfiguredPromptInbox(getConfig, telegram, inFlight);
 
   await telegram.poll({
@@ -80,7 +113,7 @@ async function handleTelegramMessage(config, telegram, inFlight, topic, envelope
     return;
   }
   if (isStopCommand(envelope.text)) {
-    await handleStopCommand(telegram, topic, envelope, active);
+    await handleStopCommand(telegram, topic, envelope, active, isDurableTopic(topic));
     return;
   }
   if (isRetryCommand(envelope.text)) {
@@ -139,14 +172,18 @@ function startConfiguredPromptInbox(getConfig, telegram, inFlight) {
   });
 }
 
-async function startBrokerApi(getConfig, telegram, inFlight) {
-  const initialConfig = getConfig();
-  const socketPath = resolveBrokerSocketPath(initialConfig);
+async function startBrokerApi(getConfig, telegram, inFlight, socketPath) {
   const submissions = new Map();
   await startBrokerIpcServer({
     socketPath,
-    onConnection: acceptSdkRpcConnection,
+    onConnection: (frame, peer) => (
+      durableDriver.acceptConnection(frame, peer) || acceptSdkRpcConnection(frame, peer)
+    ),
     onRequest: async (value) => {
+      if (value?.version === BROKER_PROTOCOL_VERSION && value?.type === "durable_host_drain") {
+        await durableDriver.drainAndClose();
+        return { closed: true };
+      }
       const request = normalizeBrokerSubmitRequest(value);
       const signature = JSON.stringify(request);
       const existing = submissions.get(request.id);
@@ -205,6 +242,29 @@ function sendLongMessage(telegram, message) {
   return telegram.sendLongMessage(message);
 }
 
+function handleDurableDriverEvent(getConfig, telegram, inFlight, event, data) {
+  if (event !== "conversation.events" || !Array.isArray(data?.events)) return;
+  const config = getConfig();
+  const topic = config.topics.find((candidate) => (
+    isDurableTopic(candidate) && durableEndpointKey(candidate) === data.endpointKey
+  ));
+  if (!topic) return;
+  const active = inFlight.get(`${topic.chat_id}:${topic.topic_id}`);
+  if (!active) return;
+  for (const durableEvent of data.events) {
+    const turnIndex = active.durableTurnIndex || 0;
+    const piEvents = durableEventToPiEvents(durableEvent, turnIndex);
+    if (durableEvent.type === "turn_start") active.durableTurnIndex = turnIndex + 1;
+    for (const piEvent of piEvents) {
+      telegram.updateTurnStatusFromPiEvent(active, piEvent);
+      telegram.resetReasoningDisplayFromPiEvent(active, piEvent);
+    }
+    if (durableEvent.type === "task_failed") {
+      active.lastModelError = durableEvent.message || "Durable task failed";
+    }
+  }
+}
+
 function isHelpCommand(text) {
   return /^\/help(?:@\S+)?(?:\s|$)/i.test(String(text || "").trim());
 }
@@ -238,7 +298,7 @@ async function handleHelpCommand(telegram, config, topic, envelope) {
     "telepi gateway commands:",
     "/help — show this message",
     "/stop — stop the current turn in this topic",
-    "/compact [instructions] — compact this topic's pi session",
+    "/compact [instructions] — compact this topic's active conversation",
     "/retry — rerun the last prompt in this topic",
     inboxEnabled
       ? `Prompt inbox: enabled${process.env.TELEPI_PROMPT_INBOX_TOPIC ? ` (default topic: ${process.env.TELEPI_PROMPT_INBOX_TOPIC})` : ""}`
@@ -253,10 +313,14 @@ async function handleHelpCommand(telegram, config, topic, envelope) {
   });
 }
 
-async function handleStopCommand(telegram, topic, envelope, active) {
+async function handleStopCommand(telegram, topic, envelope, active, durable) {
   if (active) active.currentReplyToMessageId = envelope.messageId;
   try {
-    const status = await requestTurnStop(active);
+    const status = active
+      ? await requestTurnStop(active)
+      : durable
+        ? (await abortDurableTopic(durableDriver, topic)).status === "aborted" ? "requested" : "idle"
+        : "idle";
     if (status === "requested") {
       console.error(`stop requested chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${envelope.messageId}`);
       return;
@@ -512,7 +576,8 @@ async function steerRunningTopic(config, telegram, inFlight, topic, envelope, ac
 }
 
 async function handleTopicMessage(config, telegram, topic, envelope, active) {
-  console.error(`routing chat=${envelope.chatId} topic=${envelope.topicId} to ${topic.agent}/${resolveTopicSession(config, topic).id}`);
+  const backend = resolveTopicBackend(topic);
+  console.error(`routing chat=${envelope.chatId} topic=${envelope.topicId} to ${topic.agent}/${resolveTopicSession(config, topic).id} backend=${backend}`);
   const compactInstructions = parseCompactCommand(envelope.text);
   if (compactInstructions !== null) {
     active.acceptsSteering = false;
@@ -528,36 +593,40 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
   const streamAssistantMessages = useDefaultAssistantDisplay || telegram.isDisplayMessageAllowed(displayMessages, "assistant/message");
   let result;
   try {
-    const piRun = await startPiForTopic(config, topic, envelope, {
-      onText: streamAssistantMessages
-        ? (text) => telegram.queueAssistantTextDisplay(active, envelope, text)
-        : undefined,
-      onEvent: (event) => {
-        acknowledgeSteeredEnvelope(active, event);
-        telegram.updateTurnStatusFromPiEvent(active, event);
-        telegram.resetReasoningDisplayFromPiEvent(active, event);
-        telegram.updateReplyAnchorFromPiEvent(active, event);
-        if (telegram.isDeliveryEvent(event)) {
-          active.telegramDeliveryCount += 1;
-          telegram.noteTurnStatusVisibleActivity(active);
-        }
-        const modelError = advanceModelError(active.lastModelError, event);
-        active.lastModelError = modelError.lastError;
-        if (modelError.recoveredError) {
-          console.error(`model error recovered chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${modelError.recoveredError}`);
-        }
-        if (!useDefaultAssistantDisplay) {
-          telegram.queueDisplayPiEvent(active, envelope, event, displayMessages, {
-            excludeTypes: streamAssistantMessages ? ["assistant/message"] : [],
-          });
-        }
-      },
-    });
-    active.abort = piRun.abort;
-    active.steer = piRun.steer;
-    active.acceptsSteering = true;
-    active.resolveReady();
-    result = await piRun.promise;
+    if (backend === "durable") {
+      result = await runDurableTopic(durableDriver, config, telegram, topic, envelope, active);
+    } else {
+      const piRun = await startPiForTopic(config, topic, envelope, {
+        onText: streamAssistantMessages
+          ? (text) => telegram.queueAssistantTextDisplay(active, envelope, text)
+          : undefined,
+        onEvent: (event) => {
+          acknowledgeSteeredEnvelope(active, event);
+          telegram.updateTurnStatusFromPiEvent(active, event);
+          telegram.resetReasoningDisplayFromPiEvent(active, event);
+          telegram.updateReplyAnchorFromPiEvent(active, event);
+          if (telegram.isDeliveryEvent(event)) {
+            active.telegramDeliveryCount += 1;
+            telegram.noteTurnStatusVisibleActivity(active);
+          }
+          const modelError = advanceModelError(active.lastModelError, event);
+          active.lastModelError = modelError.lastError;
+          if (modelError.recoveredError) {
+            console.error(`model error recovered chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${modelError.recoveredError}`);
+          }
+          if (!useDefaultAssistantDisplay) {
+            telegram.queueDisplayPiEvent(active, envelope, event, displayMessages, {
+              excludeTypes: streamAssistantMessages ? ["assistant/message"] : [],
+            });
+          }
+        },
+      });
+      active.abort = piRun.abort;
+      active.steer = piRun.steer;
+      active.acceptsSteering = true;
+      active.resolveReady();
+      result = await piRun.promise;
+    }
   } finally {
     stopWorkingIndicator();
     stopTurnStatus();
@@ -642,17 +711,20 @@ async function handleCompactCommand(config, telegram, topic, envelope, instructi
   const startedAt = Date.now();
   const stopWorkingIndicator = telegram.startWorkingIndicator(config, topic, envelope);
   try {
-    // Compaction uses pi's SDK. Run it behind the telepi CLI process boundary so
-    // a long-lived gateway never retains an SDK/model registry from before a pi update.
-    const outcome = await compactTopicSessionWithCli(topic, instructions);
+    // Pi compaction stays behind a fresh CLI boundary; Durable compaction is
+    // delegated to the host that already owns the conversation and Harness.
+    const outcome = isDurableTopic(topic)
+      ? await compactDurableTopic(durableDriver, config, topic, instructions)
+      : await compactTopicSessionWithCli(topic, instructions);
     const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     if (outcome.status === "skipped") {
-      console.error(`compact skipped chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} duration=${durationSeconds}s reason=${JSON.stringify(outcome.reason)}`);
+      const reason = outcome.reason || outcome.placementStatus || "nothing to compact";
+      console.error(`compact skipped chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} duration=${durationSeconds}s reason=${JSON.stringify(reason)}`);
       await sendLongMessage(telegram, {
         chatId: envelope.chatId,
         topicId: envelope.topicId,
         replyToMessageId: envelope.messageId,
-        text: `Compaction skipped for ${topic.name}: ${outcome.reason}`,
+        text: `Compaction skipped for ${topic.name}: ${reason}`,
         quote: true,
       });
       return;
@@ -661,12 +733,16 @@ async function handleCompactCommand(config, telegram, topic, envelope, instructi
     console.error(`compacted chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} duration=${durationSeconds}s checkpoint=${outcome.checkpoint?.sessionId || "none"}`);
     const checkpointText = outcome.checkpoint
       ? `\nCheckpoint session: ${outcome.checkpoint.sessionId}\nTranscript bytes: ${outcome.checkpoint.sourceBytes} → ${outcome.checkpoint.checkpointBytes}`
-      : "";
+      : outcome.entryId
+        ? `\nDurable entry: ${outcome.entryId}`
+        : "";
     await sendLongMessage(telegram, {
       chatId: envelope.chatId,
       topicId: envelope.topicId,
       replyToMessageId: envelope.messageId,
-      text: `Compacted ${topic.name}.\n\nKept from entry: ${outcome.result.firstKeptEntryId}\nTokens before: ${outcome.result.tokensBefore}${checkpointText}`,
+      text: outcome.result
+        ? `Compacted ${topic.name}.\n\nKept from entry: ${outcome.result.firstKeptEntryId}\nTokens before: ${outcome.result.tokensBefore}${checkpointText}`
+        : `Compacted ${topic.name}.${checkpointText}`,
       quote: true,
     });
   } catch (error) {
