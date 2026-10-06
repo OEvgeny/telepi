@@ -51,11 +51,13 @@ test("Durable topic specs preserve a fresh endpoint beside immutable legacy hist
     agentId: "agent",
     agentDir: "/tmp/telepi-durable-topic/entities/agent",
     cwd: "/tmp/telepi-durable-topic/work/pilot",
+    location: { type: "local" },
     modelSpec: "provider/model:high",
     legacySessionId: "legacy-session",
     skillPaths: ["/tmp/telepi-durable-topic/skills/test/SKILL.md"],
     systemPrompt: "Agent instructions",
   });
+  assert.equal(durableEndpointKey({ ...topic, durable_endpoint_generation: 2 }), "telegram:10:20:g2");
   assert.deepEqual(buildDurableSubmission(config, topic, {
     chatId: "10",
     topicId: "20",
@@ -76,6 +78,70 @@ test("Durable watch events adapt to Telepi's existing activity mechanics", () =>
     { type: "message_update", assistantMessageEvent: { type: "text_delta" } },
   ]);
   assert.deepEqual(durableEventToPiEvents({ type: "run_end" }), [{ type: "agent_end" }]);
+});
+
+test("topic:set-location configures SSH only for Durable and rotates endpoint context", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "telepi-durable-ssh-config-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(join(directory, "entities", "agent"), { recursive: true });
+  const identityFile = join(directory, "identity");
+  await writeFile(identityFile, "test-only-key-path");
+  const configPath = join(directory, "telepi.yaml");
+  await writeFile(configPath, [
+    "version: 1",
+    "project:",
+    `  root: ${JSON.stringify(directory)}`,
+    "  entities_dir: entities",
+    "  sessions_dir: sessions",
+    "  cache_dir: cache",
+    "telegram:",
+    "  allowed_user_ids: []",
+    "agents:",
+    "  agent:",
+    "    name: Agent",
+    "    entity_dir: entities/agent",
+    "topics:",
+    "  - name: Remote",
+    "    agent: agent",
+    "    chat_id: '10'",
+    "    topic_id: '20'",
+    "    model: provider/model",
+    "    backend: durable",
+    "    session:",
+    "      id: legacy-session",
+    "      location:",
+    "        cwd: entities/agent",
+  ].join("\n"));
+
+  await execFileAsync(process.execPath, [
+    join(root, "bin/telepi.js"), "-c", configPath,
+    "topic:set-location", "--name", "Remote", "--type", "ssh",
+    "--cwd", "/remote/work", "--host", "tablet-alias", "--user", "agent",
+    "--port", "8022", "--identity-file", identityFile,
+  ], { cwd: root });
+  const updated = readConfig(configPath);
+  const topic = updated.topics[0];
+  assert.deepEqual(topic.session.location, {
+    type: "ssh",
+    host: "tablet-alias",
+    user: "agent",
+    port: 8022,
+    identity_file: identityFile,
+    cwd: "/remote/work",
+  });
+  assert.equal(topic.durable_endpoint_generation, 1);
+  assert.equal(updated.sessions.unlinked.at(-1).session_id, "legacy-session");
+  assert.equal(buildDurableEndpointSpec(updated, topic).cwd, "/remote/work");
+  assert.equal(buildDurableEndpointSpec(updated, topic).location.type, "ssh");
+
+  const validation = await execFileAsync(process.execPath, [
+    join(root, "bin/telepi.js"), "-c", configPath, "validate",
+  ], { cwd: root });
+  assert.match(validation.stdout, /^ok:/);
+  await assert.rejects(execFileAsync(process.execPath, [
+    join(root, "bin/telepi.js"), "-c", configPath,
+    "topic:set-backend", "--name", "Remote", "--backend", "pi",
+  ], { cwd: root }), /requires the durable backend/);
 });
 
 test("topic:set-backend is the only writer needed to opt a topic in and back out", async (t) => {

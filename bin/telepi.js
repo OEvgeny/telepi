@@ -9,6 +9,7 @@ import {
   findTopicByName,
   getAgent,
   getBotToken,
+  normalizeSessionLocation,
   readConfig,
   resolvePath,
   resolveTopicModel,
@@ -22,8 +23,15 @@ import {
 import { TelegramClient, normalizeTopicColor, resolveForumTopicIcon } from "../src/telegram/client.js";
 import { blockquoteEntities, toTelegramMarkdownV2 } from "../src/telegram/format.js";
 import { BROKER_PROTOCOL_VERSION, requestBroker, resolveBrokerSocketPath } from "../src/broker-ipc.js";
+import { acceptHostKey, forgetHostKey, scanHostKey } from "@earendil-works/pi-env";
 import { assertDurablePackageVersions } from "../src/durable/packages.js";
-import { TOPIC_BACKENDS, isDurableTopic, resolveTopicBackend } from "../src/durable/topic.js";
+import {
+  TOPIC_BACKENDS,
+  isDurableTopic,
+  resolveTopicBackend,
+  rotateDurableEndpoint,
+} from "../src/durable/topic.js";
+import { durableSshKnownHostsPath, sshTargetFromLocation } from "../src/durable/ssh-location.js";
 import { buildPiCliSpec } from "../src/pi/cli-command.js";
 import { assertSupportedPiSdk, resolvePiCliPath, resolvePiPackageIndex } from "../src/pi/path.js";
 import {
@@ -95,7 +103,9 @@ program
     for (const topic of config.topics) {
       const owner = topic.owner ? `\towner=${topic.owner}` : "";
       const session = resolveTopicSession(config, topic);
-      const location = session.location ? `\tcwd=${session.location.cwd}` : "\tmode=legacy";
+      const location = session.location
+        ? `\tlocation=${session.location.type}\tcwd=${session.location.cwd}`
+        : "\tmode=legacy";
       console.log(`${topic.name}\tchat=${topic.chat_id}\ttopic=${topic.topic_id}\tagent=${topic.agent}\tbackend=${resolveTopicBackend(topic)}\tsession=${session.id}${location}${owner}`);
     }
   });
@@ -372,8 +382,10 @@ program
     const topic = findTopicByName(config, options.name);
     if (!topic) throwCli(`unknown topic mapping: ${options.name}`);
     if (!config.agents[options.agent]) throwCli(`unknown agent: ${options.agent}`);
+    const previousAgent = topic.agent;
     topic.agent = options.agent;
     if (options.sessionId) setTopicSessionId(topic, options.sessionId);
+    if (previousAgent !== topic.agent && isDurableTopic(topic)) rotateDurableEndpoint(topic);
     save(config);
     console.log(`updated ${topic.name} -> ${topic.agent}/${resolveTopicSession(config, topic).id}`);
   });
@@ -414,6 +426,9 @@ program
     if (backend === "durable" && !resolveTopicModel(config, topic, getAgent(config, topic.agent))) {
       throwCli(`durable topic ${topic.name} requires a configured model`);
     }
+    if (backend === "pi" && resolveTopicSession(config, topic).location?.type === "ssh") {
+      throwCli(`SSH location for ${topic.name} requires the durable backend`);
+    }
     const previous = resolveTopicBackend(topic);
     if (backend === "pi") delete topic.backend;
     else topic.backend = backend;
@@ -426,6 +441,104 @@ program
       await notifyTopicBestEffort(config, topic, text);
     }
     console.log(`updated ${topic.name} backend -> ${backend}`);
+  });
+
+program
+  .command("topic:set-location")
+  .description("Set a topic's local or Durable SSH execution location and rotate its downstream context")
+  .requiredOption("--name <name>", "Existing mapping name")
+  .requiredOption("--type <local|ssh>", "Execution location type")
+  .requiredOption("--cwd <path>", "Working directory in the selected environment")
+  .option("--host <host>", "SSH host or ssh_config alias")
+  .option("--user <user>", "SSH user")
+  .option("--port <port>", "SSH port")
+  .option("--identity-file <path>", "SSH identity file, absolute or relative to the Telepi project")
+  .option("--ssh-config-file <path>", "SSH config file, absolute or relative to the Telepi project")
+  .option("--session-id <id>", "Fresh legacy Pi session id to preserve rollback history")
+  .action(async (options) => {
+    const config = load();
+    const topic = findTopicByName(config, options.name);
+    if (!topic) throwCli(`unknown topic mapping: ${options.name}`);
+    const location = normalizeSessionLocation({
+      type: options.type,
+      cwd: options.cwd,
+      host: options.host,
+      user: options.user,
+      port: options.port,
+      identity_file: options.identityFile,
+      config_file: options.sshConfigFile,
+    }, topic.name);
+    if (location.type === "ssh" && !isDurableTopic(topic)) {
+      throwCli(`SSH location for ${topic.name} requires: topic:set-backend --name ${JSON.stringify(topic.name)} --backend durable`);
+    }
+    const previous = resolveTopicSession(config, topic);
+    if (JSON.stringify(previous.location) === JSON.stringify(location)) {
+      console.log(`location unchanged for ${topic.name}`);
+      return;
+    }
+    const nextSessionId = options.sessionId || freshSessionId(topic);
+    if (String(nextSessionId) === String(previous.id)) {
+      throwCli(`location change requires a fresh --session-id (current: ${previous.id})`);
+    }
+    config.sessions.unlinked.push({
+      topic_name: topic.name,
+      chat_id: String(topic.chat_id),
+      topic_id: topic.topic_id == null ? null : String(topic.topic_id),
+      agent: topic.agent,
+      session_id: String(previous.id),
+      replaced_by_session_id: String(nextSessionId),
+      unlinked_at: new Date().toISOString(),
+      reason: `execution location changed from ${previous.location?.type || "legacy"} to ${location.type}`,
+    });
+    topic.session = createTopicSessionConfig(nextSessionId, location.cwd, location);
+    delete topic.session_id;
+    const generation = rotateDurableEndpoint(topic);
+    save(config);
+    await notifyTopicBestEffort(
+      config,
+      topic,
+      `Execution location changed for ${topic.name}: ${location.type}. A fresh downstream context is active; previous Pi and Durable history remains preserved.`,
+    );
+    console.log(`updated ${topic.name} location -> ${location.type}:${location.cwd} (durable generation ${generation})`);
+  });
+
+program
+  .command("topic:ssh-host-key")
+  .description("Scan or explicitly trust the SSH host key for a Durable SSH topic")
+  .requiredOption("--name <name>", "Existing SSH topic mapping name")
+  .option("--accept <fingerprint>", "Accept only the scanned key matching this SHA256 fingerprint")
+  .option("--forget", "Remove the currently trusted keys before a separately verified replacement")
+  .action(async (options) => {
+    const config = load();
+    const topic = findTopicByName(config, options.name);
+    if (!topic) throwCli(`unknown topic mapping: ${options.name}`);
+    const session = resolveTopicSession(config, topic);
+    if (session.location?.type !== "ssh") throwCli(`topic ${topic.name} does not have an SSH location`);
+    const target = sshTargetFromLocation(session.location, {
+      projectRoot: config.project.root,
+      knownHostsFile: durableSshKnownHostsPath(config.project.root),
+    });
+    if (options.forget) {
+      if (options.accept) throwCli(`--forget and --accept cannot be used together`);
+      await forgetHostKey(target);
+      console.log(`forgot trusted SSH host keys for ${topic.name}; scan and verify the replacement before accepting it`);
+      return;
+    }
+    const scanned = await scanHostKey(target);
+    if (!options.accept) {
+      console.log(scanned.fingerprints.join("\n"));
+      console.log(`Review a fingerprint out of band, then rerun with --accept <SHA256:fingerprint>.`);
+      return;
+    }
+    const requested = String(options.accept).trim();
+    const indexes = scanned.fingerprints
+      .map((fingerprint, index) => ({ fingerprint, index }))
+      .filter(({ fingerprint }) => fingerprint.split(/\s+/).includes(requested) || fingerprint === requested);
+    if (!indexes.length) {
+      throwCli(`fingerprint ${requested} was not offered by ${session.location.host}; scanned: ${scanned.fingerprints.join("; ")}`);
+    }
+    await acceptHostKey(target, indexes.map(({ index }) => scanned.lines[index]));
+    console.log(`trusted SSH host key for ${topic.name}: ${indexes.map(({ fingerprint }) => fingerprint).join("; ")}`);
   });
 
 program
@@ -874,7 +987,16 @@ function validateConfig(config) {
       errors.push(`durable topic ${topic.name} requires a configured model`);
     }
     try {
-      if (!resolveTopicSession(config, topic).id) errors.push(`topic ${topic.name} missing session id`);
+      const session = resolveTopicSession(config, topic);
+      if (!session.id) errors.push(`topic ${topic.name} missing session id`);
+      if (session.location?.type === "ssh") {
+        if (!isDurableTopic(topic)) errors.push(`SSH topic ${topic.name} requires backend durable`);
+        for (const field of ["identity_file", "config_file"]) {
+          if (session.location[field] && !existsSync(resolvePath(config.project.root, session.location[field]))) {
+            errors.push(`SSH topic ${topic.name} ${field} missing: ${session.location[field]}`);
+          }
+        }
+      }
     } catch (error) {
       errors.push(error.message);
     }

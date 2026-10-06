@@ -23,7 +23,18 @@ import {
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { RemoteExecutionEnv, sshConnection } from "@earendil-works/pi-env";
 import { applyHttpProxySettings, configurePiHttpDispatcher } from "../pi/http-dispatcher.js";
+import {
+  loadLocalAgentContext,
+  loadProjectSkillsFromEnv,
+  loadRemoteProjectContextFiles,
+} from "./remote-context.js";
+import {
+  sshConnectionKey,
+  sshEnvironmentId,
+  sshTargetFromLocation,
+} from "./ssh-location.js";
 
 const context = BACKGROUND_CONTEXT;
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -51,6 +62,7 @@ export const ConversationDoc = defineDoc({
     agentId: null,
     agentDir: null,
     cwd: null,
+    location: { type: "local" },
     backendVersion: 1,
     legacySessionId: null,
     skillPaths: [],
@@ -79,7 +91,11 @@ export async function openDurableHost(options) {
   const registry = createRegistry();
   registry.install(CodingTools);
   registry.install(prompt);
-  const envs = new ExecutionEnvs(options.projectRoot || process.cwd());
+  const envs = new ExecutionEnvs(options.projectRoot || process.cwd(), {
+    knownHostsFile: join(storageDir, "ssh-known-hosts"),
+    onLog: options.onSshLog,
+    sshConnectionFactory: options.sshConnectionFactory,
+  });
   const reports = [];
   const harness = await Harness.open(
     await openNodeSqliteStorage(databasePath),
@@ -268,7 +284,7 @@ function buildAgentChange(models, spec) {
     model: { provider: parsed.provider, modelId: parsed.modelId },
     thinkingLevel,
     extensions: [CodingTools, createTelepiPrompt()],
-    cwd: resolve(spec.cwd),
+    cwd: endpointCwd(spec),
   };
 }
 
@@ -282,7 +298,12 @@ function createTelepiPrompt() {
       section("project_context", async (input, renderContext) => {
         const metadata = await input.read.snapshot(ConversationDoc, input.conversationId, renderContext);
         if (!metadata?.agentDir || !metadata.cwd) return undefined;
-        const files = loadProjectContextFiles({ cwd: metadata.cwd, agentDir: metadata.agentDir });
+        const files = metadata.location?.type === "ssh"
+          ? [
+              ...loadLocalAgentContext(metadata.agentDir),
+              ...await loadRemoteProjectContextFiles(input.env, renderContext),
+            ]
+          : loadProjectContextFiles({ cwd: metadata.cwd, agentDir: metadata.agentDir });
         const blocks = files.map(({ path, content }) => `<context path=${JSON.stringify(path)}>\n${content}\n</context>`);
         if (metadata.systemPrompt) blocks.unshift(metadata.systemPrompt);
         return blocks.length ? blocks.join("\n\n") : undefined;
@@ -290,12 +311,23 @@ function createTelepiPrompt() {
       section("skills", async (input, renderContext) => {
         const metadata = await input.read.snapshot(ConversationDoc, input.conversationId, renderContext);
         if (!metadata?.agentDir || !metadata.cwd) return undefined;
+        const isRemote = metadata.location?.type === "ssh";
         const loaded = loadSkills({
-          cwd: metadata.cwd,
+          cwd: isRemote ? metadata.agentDir : metadata.cwd,
           agentDir: metadata.agentDir,
           skillPaths: metadata.skillPaths || [],
           includeDefaults: true,
         });
+        if (isRemote) {
+          const remote = await loadProjectSkillsFromEnv(input.env, input.env.cwd, renderContext);
+          const names = new Set(loaded.skills.map((skill) => skill.name));
+          for (const skill of remote.skills) {
+            if (!names.has(skill.name)) {
+              loaded.skills.push(skill);
+              names.add(skill.name);
+            }
+          }
+        }
         return loaded.skills.length ? formatSkillsForPrompt(loaded.skills) : undefined;
       }),
       section("cwd", (input) => input.env?.cwd || input.agent.cwd),
@@ -331,24 +363,70 @@ function createHarnessSettings(settingsManager, extensions) {
 }
 
 class ExecutionEnvs {
-  constructor(defaultCwd) {
+  constructor(defaultCwd, options = {}) {
     this.defaultCwd = defaultCwd;
-    this.envs = new Map();
-    this.env = ({ cwd = this.defaultCwd }) => {
+    this.projectRoot = resolve(defaultCwd);
+    this.knownHostsFile = options.knownHostsFile;
+    this.onLog = options.onLog;
+    this.sshConnectionFactory = options.sshConnectionFactory || ((target) => sshConnection(target));
+    this.localEnvs = new Map();
+    this.remoteEnvs = new Map();
+    this.remoteConnections = new Map();
+    this.env = async ({ conversationId, cwd = this.defaultCwd, read }, envContext) => {
+      const metadata = await read.snapshot(ConversationDoc, conversationId, envContext);
+      const location = metadata?.location || { type: "local" };
+      if (location.type === "ssh") return this.remote(location, cwd);
       const path = resolve(cwd);
-      let env = this.envs.get(path);
+      let env = this.localEnvs.get(path);
       if (!env) {
         env = new NodeExecutionEnv({ cwd: path });
-        this.envs.set(path, env);
+        this.localEnvs.set(path, env);
       }
       return env;
     };
   }
 
+  remote(location, cwd) {
+    const connectionKey = sshConnectionKey(location, {
+      projectRoot: this.projectRoot,
+      knownHostsFile: this.knownHostsFile,
+    });
+    let connection = this.remoteConnections.get(connectionKey);
+    if (!connection) {
+      const target = sshTargetFromLocation(location, {
+        projectRoot: this.projectRoot,
+        knownHostsFile: this.knownHostsFile,
+      });
+      const opened = this.sshConnectionFactory({
+        ...target,
+        onLog: this.onLog,
+      });
+      connection = opened.connection || opened;
+      this.remoteConnections.set(connectionKey, connection);
+    }
+    const key = `${connectionKey}\0${cwd}`;
+    let env = this.remoteEnvs.get(key);
+    if (!env) {
+      env = new RemoteExecutionEnv({
+        connection,
+        id: sshEnvironmentId(location),
+        cwd,
+      });
+      this.remoteEnvs.set(key, env);
+    }
+    return env;
+  }
+
   async cleanup(cleanupContext) {
-    const envs = [...this.envs.values()];
-    this.envs.clear();
-    for (const env of envs) await env.cleanup(cleanupContext);
+    const envs = [...this.localEnvs.values(), ...this.remoteEnvs.values()];
+    this.localEnvs.clear();
+    this.remoteEnvs.clear();
+    try {
+      for (const env of envs) await env.cleanup(cleanupContext);
+    } finally {
+      for (const connection of this.remoteConnections.values()) connection.close();
+      this.remoteConnections.clear();
+    }
   }
 }
 
@@ -388,7 +466,8 @@ function assignConversationMetadata(metadata, spec) {
   metadata.endpointKey = spec.endpointKey;
   metadata.agentId = spec.agentId;
   metadata.agentDir = resolve(spec.agentDir);
-  metadata.cwd = resolve(spec.cwd);
+  metadata.cwd = endpointCwd(spec);
+  metadata.location = endpointLocation(spec);
   metadata.backendVersion = 1;
   metadata.legacySessionId = spec.legacySessionId || null;
   metadata.skillPaths = [...new Set((spec.skillPaths || []).map((path) => resolve(path)))];
@@ -400,9 +479,10 @@ function assertBindingMatches(spec, metadata) {
   for (const [field, expected] of [
     ["agentId", spec.agentId],
     ["agentDir", resolve(spec.agentDir)],
-    ["cwd", resolve(spec.cwd)],
+    ["cwd", endpointCwd(spec)],
+    ["location", endpointLocation(spec)],
   ]) {
-    if (metadata[field] !== expected) {
+    if (!sameBindingValue(metadata[field], expected)) {
       throw new Error(`Durable endpoint ${spec.endpointKey} ${field} changed; rotate the endpoint before reusing it`);
     }
   }
@@ -414,6 +494,37 @@ function validateEndpointSpec(spec) {
   requireString(spec?.agentDir, "agentDir");
   requireString(spec?.cwd, "cwd");
   requireString(spec?.modelSpec, "modelSpec");
+  endpointLocation(spec);
+}
+
+function endpointLocation(spec) {
+  const location = spec.location || { type: "local" };
+  if (location.type === "local") return { type: "local" };
+  if (location.type !== "ssh") throw new Error(`Unsupported Durable location type: ${location.type}`);
+  const normalized = {
+    type: "ssh",
+    host: requireString(location.host, "SSH host"),
+  };
+  for (const field of ["user", "identity_file", "config_file"]) {
+    if (location[field]) normalized[field] = requireString(location[field], `SSH ${field}`);
+  }
+  if (location.port != null) {
+    const port = Number(location.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`Invalid SSH port: ${location.port}`);
+    normalized.port = port;
+  }
+  return normalized;
+}
+
+function endpointCwd(spec) {
+  return endpointLocation(spec).type === "ssh" ? requireString(spec.cwd, "cwd") : resolve(spec.cwd);
+}
+
+function sameBindingValue(actual, expected) {
+  if (actual == null && expected?.type === "local") return true;
+  return typeof expected === "object"
+    ? JSON.stringify(actual || null) === JSON.stringify(expected)
+    : actual === expected;
 }
 
 export function parseModelSpec(value) {

@@ -29,7 +29,19 @@ export function resolveInfrastructureAgentDir(env = process.env) {
 }
 
 export function durableEndpointKey(topic) {
-  return `telegram:${String(topic.chat_id)}:${topic.topic_id == null ? "root" : String(topic.topic_id)}`;
+  const base = `telegram:${String(topic.chat_id)}:${topic.topic_id == null ? "root" : String(topic.topic_id)}`;
+  const generation = durableEndpointGeneration(topic);
+  return generation > 0 ? `${base}:g${generation}` : base;
+}
+
+export function rotateDurableEndpoint(topic) {
+  topic.durable_endpoint_generation = durableEndpointGeneration(topic) + 1;
+  return topic.durable_endpoint_generation;
+}
+
+function durableEndpointGeneration(topic) {
+  const generation = Number(topic.durable_endpoint_generation || 0);
+  return Number.isSafeInteger(generation) && generation >= 0 ? generation : 0;
 }
 
 export function buildDurableEndpointSpec(config, topic, options = {}) {
@@ -44,6 +56,7 @@ export function buildDurableEndpointSpec(config, topic, options = {}) {
     agentId: topic.agent,
     agentDir,
     cwd: session.cwd,
+    location: session.location?.type === "ssh" ? session.location : { type: "local" },
     modelSpec,
     legacySessionId: session.id,
     skillPaths: (agent.skills || []).map((path) => resolvePath(config.project.root, path)),

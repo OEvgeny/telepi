@@ -29,6 +29,7 @@ New topic mappings use a location-aware session:
 session:
   id: helper-main
   location:
+    type: local
     cwd: entities/helper
 ```
 
@@ -88,6 +89,20 @@ npm run telepi -- topic:set-backend --name Helper --backend pi
 ```
 
 The first Durable prompt creates a fresh ownerless conversation in `.telepi/durable-host/telepi.sqlite`; it never imports, rewrites, or deletes the topic's JSONL history. The gateway starts one locked multi-conversation host child only when an enabled topic is opted in. Durable currently reuses Pi's model/settings/context/skill services plus Durable's coding tools and activity events. It is a pilot backend: semantic outbox receipts, Telegram-specific tools, full extension parity, automatic compaction policy hooks, and resource governors remain migration gates, so no topic is opted in by default.
+
+A Durable topic may run its coding tools in an SSH workspace through the official `@earendil-works/pi-env` transport:
+
+```bash
+npm run telepi -- topic:set-backend --name Helper --backend durable
+npm run telepi -- topic:set-location --name Helper --type ssh --host <ssh-config-alias> --user <remote-user> --cwd /remote/project [--port 22] [--identity-file <path>] [--ssh-config-file <path>]
+npm run telepi -- topic:ssh-host-key --name Helper
+# Compare a displayed SHA256 fingerprint through an independent channel first:
+npm run telepi -- topic:ssh-host-key --name Helper --accept SHA256:<verified-fingerprint>
+```
+
+`topic:set-location` writes the active, normally gitignored Telepi config, records the replaced Pi session mapping, and rotates to a fresh Durable endpoint; old JSONL and Durable history remains intact. Host keys are kept separately in `.telepi/durable-host/ssh-known-hosts` and are never accepted automatically. Use `topic:ssh-host-key --forget` only before separately scanning and verifying a legitimate replacement key.
+
+Agent identity, agent-wide skills, model credentials, and the Durable database remain local. Project `AGENTS.md`/`CLAUDE.md`, project `.pi/skills`, filesystem operations, and shell commands come from the remote workspace. `pi-env` is transport, not a sandbox: tools have the authority of the configured SSH account, so use a dedicated account or container when isolation is required. SSH locations are rejected by the ordinary Pi backend.
 
 Start a topic with a fresh pi session without deleting old transcript files:
 

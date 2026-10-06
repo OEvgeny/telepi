@@ -6,6 +6,7 @@ import test from "node:test";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
+import { Connection, packagedDaemon } from "@earendil-works/pi-env";
 
 import { assertDurablePackageVersions, DURABLE_PACKAGE_VERSION } from "../src/durable/packages.js";
 import { openDurableHost, parseModelSpec } from "../src/durable/runtime.js";
@@ -21,12 +22,13 @@ async function fixture(t) {
   return { directory, workspace, otherWorkspace, agentDir };
 }
 
-function endpoint(key, cwd, agentDir) {
+function endpoint(key, cwd, agentDir, options = {}) {
   return {
     endpointKey: key,
     agentId: "test",
     agentDir,
     cwd,
+    location: options.location || { type: "local" },
     modelSpec: "faux/faux-1:high",
     legacySessionId: `legacy-${key}`,
     skillPaths: [],
@@ -100,6 +102,56 @@ test("one Durable host runs two endpoint conversations concurrently and deduplic
     host.ensureEndpoint(endpoint("endpoint:one", paths.otherWorkspace, paths.agentDir)),
     /cwd changed; rotate the endpoint/,
   );
+  await assert.rejects(
+    host.ensureEndpoint(endpoint("endpoint:one", paths.workspace, paths.agentDir, {
+      location: { type: "ssh", host: "changed.invalid" },
+    })),
+    /location changed; rotate the endpoint/,
+  );
+});
+
+test("official pi-env supplies a remote Durable workspace and remote project context", async (t) => {
+  const paths = await fixture(t);
+  const remoteCwd = join(paths.workspace, "nested");
+  await mkdir(join(remoteCwd, ".pi", "skills", "remote-skill"), { recursive: true });
+  await writeFile(join(paths.workspace, "AGENTS.md"), "# Remote project\n\nREMOTE_CONTEXT_SENTINEL\n");
+  await writeFile(
+    join(remoteCwd, ".pi", "skills", "remote-skill", "SKILL.md"),
+    "---\nname: remote-skill\ndescription: Instructions owned by the remote workspace.\n---\n\nREMOTE_SKILL_SENTINEL\n",
+  );
+
+  const faux = fauxProvider();
+  const models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses([(request) => {
+    const prompt = JSON.stringify(request.messages);
+    assert.match(prompt, /Test agent/);
+    assert.match(prompt, /REMOTE_CONTEXT_SENTINEL/);
+    assert.match(prompt, /remote-skill/);
+    assert.match(prompt, /Instructions owned by the remote workspace/);
+    return fauxAssistantMessage("remote-ready");
+  }]);
+
+  const platform = process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux";
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  const connection = new Connection({ command: [packagedDaemon({ platform, arch })] });
+  const host = await openDurableHost({
+    storageDir: paths.directory,
+    infrastructureAgentDir: paths.agentDir,
+    projectRoot: paths.directory,
+    models,
+    settingsManager: SettingsManager.inMemory({}),
+    sshConnectionFactory: () => ({ connection }),
+  });
+  t.after(() => host.close());
+
+  await host.ensureEndpoint(endpoint("endpoint:ssh", remoteCwd, paths.agentDir, {
+    location: { type: "ssh", host: "test.invalid", user: "tester" },
+  }));
+  const submitted = await host.submit("endpoint:ssh", { requestId: "remote-request", content: "inspect remote" });
+  const result = await host.waitSubmission("endpoint:ssh", submitted.submissionId);
+  assert.equal(result.status, "done");
+  assert.equal(result.answers.at(-1)?.text, "remote-ready");
 });
 
 test("SQLite reopen preserves endpoint mapping and conversation identity", async (t) => {

@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import YAML from "yaml";
 
 export const DEFAULT_CONFIG_PATH = "config/telepi.yaml";
+export const SESSION_LOCATION_TYPES = new Set(["local", "ssh"]);
 
 export function projectRootFromConfigPath(configPath) {
   return resolve(dirname(configPath), "..");
@@ -207,20 +208,60 @@ export function resolveTopicSession(config, topic, options = {}) {
   if (typeof configuredLocation !== "object" || Array.isArray(configuredLocation)) {
     throw new Error(`Invalid session location for ${topic.name}: expected an object`);
   }
-  const configuredCwd = String(configuredLocation.cwd || "").trim();
-  if (!configuredCwd) throw new Error(`Session location for ${topic.name} is missing cwd`);
+  const location = normalizeSessionLocation(configuredLocation, topic.name);
   return {
     id,
-    cwd: resolvePath(config.project.root, configuredCwd),
+    cwd: location.type === "ssh" ? location.cwd : resolvePath(config.project.root, location.cwd),
     entityDir,
-    location: { ...configuredLocation, cwd: configuredCwd },
+    location,
   };
 }
 
-export function createTopicSessionConfig(id, cwd) {
+export function normalizeSessionLocation(value, topicName = "topic") {
+  const type = String(value?.type || "local").trim().toLowerCase();
+  if (!SESSION_LOCATION_TYPES.has(type)) {
+    throw new Error(`Session location for ${topicName} has unsupported type ${type}`);
+  }
+  const cwd = String(value?.cwd || "").trim();
+  if (!cwd) throw new Error(`Session location for ${topicName} is missing cwd`);
+  if (type === "local") return { type, cwd };
+
+  const host = normalizeSshToken(value?.host, `SSH session location for ${topicName} is missing host`);
+  const location = { type, cwd, host };
+  const user = String(value?.user || "").trim();
+  if (user) location.user = normalizeSshToken(user, `SSH session location for ${topicName} has invalid user`);
+  for (const field of ["identity_file", "config_file"]) {
+    const normalized = String(value?.[field] || "").trim();
+    if (normalized) {
+      if (/["\x00-\x1f\x7f]/.test(normalized)) {
+        throw new Error(`SSH session location for ${topicName} has invalid ${field}: ${JSON.stringify(normalized)}`);
+      }
+      location[field] = normalized;
+    }
+  }
+  if (value?.port != null && String(value.port).trim() !== "") {
+    const port = Number(value.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`SSH session location for ${topicName} has invalid port ${value.port}`);
+    }
+    location.port = port;
+  }
+  return location;
+}
+
+function normalizeSshToken(value, message) {
+  const token = String(value || "").trim();
+  if (!token) throw new Error(message);
+  if (token.startsWith("-") || /[\s\x00-\x1f\x7f]/.test(token)) {
+    throw new Error(`Invalid SSH token (${message}): ${JSON.stringify(token)}`);
+  }
+  return token;
+}
+
+export function createTopicSessionConfig(id, cwd, location = {}) {
   return {
     id: String(id),
-    location: { cwd: String(cwd) },
+    location: { ...location, cwd: String(cwd) },
   };
 }
 

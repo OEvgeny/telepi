@@ -27,6 +27,7 @@ try {
     infrastructureAgentDir: args.infrastructureAgentDir,
     projectRoot: args.projectRoot,
     onReport: (error) => console.error(`durable report: ${error instanceof Error ? error.stack || error.message : error}`),
+    onSshLog: (text) => console.error(`durable ssh: ${String(text).trim()}`),
   });
   peer = await connectBrokerPeer(args.socket, { maxFrameBytes: MAX_DURABLE_FRAME_BYTES });
   await peer.send(durableFrame("host.connect", { nonce: args.nonce, pid: process.pid }));

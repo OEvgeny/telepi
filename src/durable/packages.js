@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, parse } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const DURABLE_PACKAGE_VERSION = "1.0.3";
+export const DURABLE_PACKAGE_VERSION = "1.0.4";
 export const DURABLE_PACKAGE_FAMILY = [
   "@earendil-works/chord",
   "@earendil-works/pi-agent-core",
@@ -10,6 +10,7 @@ export const DURABLE_PACKAGE_FAMILY = [
   "@earendil-works/pi-codemode",
   "@earendil-works/pi-coding-agent",
   "@earendil-works/pi-durable",
+  "@earendil-works/pi-env",
   "@earendil-works/pi-mcp",
   "@earendil-works/pi-telemetry",
   "@earendil-works/pi-tui",

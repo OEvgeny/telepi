@@ -5,6 +5,9 @@ import { resolveBrokerSocketPath } from "../broker-ipc.js";
 export function buildTopicRunSpec(config, topic, envelope, options = {}) {
   const agent = getAgent(config, topic.agent);
   const session = resolveTopicSession(config, topic, { agent, sessionId: options.sessionId });
+  if (session.location?.type === "ssh") {
+    throw new Error(`SSH session location for ${topic.name} is supported only by the Durable backend`);
+  }
   mkdirSync(session.entityDir, { recursive: true });
   mkdirSync(session.cwd, { recursive: true });
   mkdirSync(config.project.sessions_dir, { recursive: true });

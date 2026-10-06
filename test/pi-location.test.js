@@ -7,12 +7,28 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { readConfig } from "../src/config.js";
+import { normalizeSessionLocation, readConfig, resolveTopicSession } from "../src/config.js";
 import { resolvePiPackageIndex } from "../src/pi/path.js";
 import { buildTopicRuntimeSpec, createTopicRuntime } from "../src/pi/runtime.js";
+import { buildTopicRunSpec } from "../src/pi/topic-spec.js";
 
 const execFileAsync = promisify(execFile);
 const root = resolve(new URL("..", import.meta.url).pathname);
+
+test("SSH session locations reject unsafe SSH option tokens", () => {
+  assert.throws(
+    () => normalizeSessionLocation({ type: "ssh", cwd: "/work", host: "-oProxyCommand=bad" }, "Unsafe"),
+    /Invalid SSH token/,
+  );
+  assert.throws(
+    () => normalizeSessionLocation({ type: "ssh", cwd: "/work", host: "example", user: "bad user" }, "Unsafe"),
+    /invalid user/,
+  );
+  assert.throws(
+    () => normalizeSessionLocation({ type: "ssh", cwd: "/work", host: "example", port: 70000 }, "Unsafe"),
+    /invalid port/,
+  );
+});
 
 test("new topic mappings enter location mode with the entity root as agent home and cwd", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "telepi-location-"));
@@ -99,6 +115,15 @@ test("new topic mappings enter location mode with the entity root as agent home 
   await assert.rejects(
     createTopicRuntime(pi, config, topic, { infrastructureAgentDir: pi.getAgentDir() }),
     /rotate the topic session before changing its location/,
+  );
+
+  topic.session.location = { type: "ssh", host: "remote-alias", cwd: "/remote/project" };
+  const remoteSession = resolveTopicSession(config, topic);
+  assert.equal(remoteSession.cwd, "/remote/project");
+  assert.equal(remoteSession.location.type, "ssh");
+  assert.throws(
+    () => buildTopicRunSpec(config, topic, { chatId: "1", topicId: "2", text: "test" }),
+    /supported only by the Durable backend/,
   );
 
   const legacyTopic = { ...topic, name: "Legacy", topic_id: "3", session_id: "legacy" };
