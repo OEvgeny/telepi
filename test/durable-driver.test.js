@@ -87,6 +87,82 @@ test("DurableDriver has side-effect-free construction and coalesces concurrent i
   await released.release();
 });
 
+test("Durable host can call gateway tools over the promoted peer protocol", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "telepi-durable-bidirectional-"));
+  const socketPath = join(directory, "broker.sock");
+  const storageDir = join(directory, "store");
+  const agentDir = join(directory, "agent");
+  const hostPath = join(directory, "fake-host.mjs");
+  const resultPath = join(directory, "gateway-response.json");
+  await mkdir(agentDir);
+  await writeFile(join(agentDir, "settings.json"), "{}\n");
+  await writeFile(hostPath, `
+    import { writeFile } from "node:fs/promises";
+    import { connectBrokerPeer } from ${JSON.stringify(new URL("../src/broker-ipc.js", import.meta.url).href)};
+    import { durableFrame } from ${JSON.stringify(new URL("../src/durable/protocol.js", import.meta.url).href)};
+    const argv = Object.fromEntries(process.argv.slice(2).reduce((pairs, value, index, all) => {
+      if (value.startsWith("--")) pairs.push([value.slice(2), all[index + 1]]);
+      return pairs;
+    }, []));
+    const peer = await connectBrokerPeer(argv.socket);
+    await peer.send(durableFrame("host.connect", { nonce: argv.nonce, pid: process.pid }));
+    await peer.read();
+    await peer.send(durableFrame("host.ready", { nonce: argv.nonce, pid: process.pid }));
+    await peer.send(durableFrame("gateway.request", {
+      nonce: argv.nonce,
+      id: "gateway-one",
+      method: "test.echo",
+      params: { value: 42 },
+    }));
+    const gatewayResponse = await peer.read();
+    await writeFile(${JSON.stringify(resultPath)}, JSON.stringify(gatewayResponse));
+    for (;;) {
+      const request = await peer.read();
+      await peer.send(durableFrame("response", {
+        nonce: argv.nonce,
+        id: request.id,
+        success: true,
+        data: request.method === "host.shutdown" ? { closed: true } : {},
+      }));
+      if (request.method === "host.shutdown") break;
+    }
+    peer.end();
+  `);
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  const calls = [];
+  const driver = new DurableDriver({
+    socketPath,
+    storageDir,
+    projectRoot: directory,
+    infrastructureAgentDir: agentDir,
+    hostPath,
+    readyTimeoutMs: 15_000,
+    log: () => undefined,
+    gatewayRequestHandler: async (method, params) => {
+      calls.push({ method, params });
+      return { echoed: params.value };
+    },
+  });
+  const server = await startBrokerIpcServer({
+    socketPath,
+    onConnection: (frame, peer) => driver.acceptConnection(frame, peer),
+    onRequest: () => ({}),
+  });
+  t.after(() => server.close());
+  t.after(() => driver.drainAndClose());
+  await driver.init();
+  for (let attempt = 0; attempt < 100 && await missing(resultPath); attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+  const response = JSON.parse(await import("node:fs/promises").then((fs) => fs.readFile(resultPath, "utf8")));
+  assert.deepEqual(calls, [{ method: "test.echo", params: { value: 42 } }]);
+  assert.equal(response.type, "gateway.response");
+  assert.equal(response.success, true);
+  assert.deepEqual(response.data, { echoed: 42 });
+  await driver.drainAndClose();
+});
+
 test("Durable storage lock refuses a second live owner", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "telepi-durable-lock-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

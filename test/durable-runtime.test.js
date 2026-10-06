@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Connection, packagedDaemon } from "@earendil-works/pi-env";
 
@@ -110,27 +110,77 @@ test("one Durable host runs two endpoint conversations concurrently and deduplic
   );
 });
 
-test("official pi-env supplies a remote Durable workspace and remote project context", async (t) => {
+test("official pi-env supplies remote agent resources, project context, skills, and browser tools", async (t) => {
   const paths = await fixture(t);
   const remoteCwd = join(paths.workspace, "nested");
+  const remoteAgentDir = join(paths.directory, "remote-agent");
+  const browserRoot = join(remoteAgentDir, "browser-package");
   await mkdir(join(remoteCwd, ".pi", "skills", "remote-skill"), { recursive: true });
+  await mkdir(join(remoteAgentDir, "skills", "agent-skill"), { recursive: true });
+  await mkdir(join(browserRoot, "src"), { recursive: true });
+  await mkdir(join(browserRoot, "skills", "browser-skill"), { recursive: true });
   await writeFile(join(paths.workspace, "AGENTS.md"), "# Remote project\n\nREMOTE_CONTEXT_SENTINEL\n");
+  await writeFile(join(remoteAgentDir, "AGENTS.md"), "# Remote agent\n\nREMOTE_AGENT_SENTINEL\n");
+  await writeFile(join(remoteAgentDir, "settings.json"), JSON.stringify({ packages: ["browser-package"] }));
+  await writeFile(
+    join(remoteAgentDir, "skills", "agent-skill", "SKILL.md"),
+    "---\nname: agent-skill\ndescription: Instructions owned by the remote agent.\n---\n",
+  );
   await writeFile(
     join(remoteCwd, ".pi", "skills", "remote-skill", "SKILL.md"),
-    "---\nname: remote-skill\ndescription: Instructions owned by the remote workspace.\n---\n\nREMOTE_SKILL_SENTINEL\n",
+    "---\nname: remote-skill\ndescription: Instructions owned by the remote workspace.\n---\n",
   );
+  await writeFile(join(browserRoot, "package.json"), JSON.stringify({
+    name: "test-browser",
+    type: "module",
+    pi: { extensions: ["./extensions"], skills: ["./skills"] },
+  }));
+  await writeFile(
+    join(browserRoot, "skills", "browser-skill", "SKILL.md"),
+    "---\nname: browser-skill\ndescription: Instructions owned by the remote browser package.\n---\n",
+  );
+  await writeFile(join(browserRoot, "src", "session.mjs"), `
+    export class Session {
+      async start() { return { url: "https://remote.test", viewport: { width: 800, height: 600 } }; }
+      async close() {}
+    }
+  `);
+  await writeFile(join(browserRoot, "src", "output.mjs"), `
+    export const bound = (text) => String(text);
+    export const renderReady = () => "REMOTE_BROWSER_READY";
+    export const renderCapture = renderReady;
+    export const renderInspect = renderReady;
+    export const renderInteract = renderReady;
+    export const renderRecordCase = renderReady;
+    export const renderRunSummary = renderReady;
+  `);
 
   const faux = fauxProvider();
   const models = createModels();
   models.setProvider(faux.provider);
-  faux.setResponses([(request) => {
-    const prompt = JSON.stringify(request.messages);
-    assert.match(prompt, /Test agent/);
-    assert.match(prompt, /REMOTE_CONTEXT_SENTINEL/);
-    assert.match(prompt, /remote-skill/);
-    assert.match(prompt, /Instructions owned by the remote workspace/);
-    return fauxAssistantMessage("remote-ready");
-  }]);
+  faux.setResponses([
+    (request) => {
+      const prompt = JSON.stringify(request);
+      assert.doesNotMatch(prompt, /Test agent/);
+      assert.match(prompt, /REMOTE_AGENT_SENTINEL/);
+      assert.match(prompt, /REMOTE_CONTEXT_SENTINEL/);
+      assert.match(prompt, /agent-skill/);
+      assert.match(prompt, /remote-skill/);
+      assert.match(prompt, /browser-skill/);
+      assert.match(prompt, /"name":"browser"/);
+      assert.match(prompt, /"name":"telepi_send_message"/);
+      assert.match(prompt, /"name":"telepi_send_image"/);
+      assert.match(prompt, /"name":"telepi_buttons"/);
+      return fauxAssistantMessage(
+        fauxToolCall("browser", { action: "start", url: "https://remote.test" }),
+        { stopReason: "toolUse" },
+      );
+    },
+    (request) => {
+      assert.match(JSON.stringify(request.messages), /REMOTE_BROWSER_READY/);
+      return fauxAssistantMessage("remote-ready");
+    },
+  ]);
 
   const platform = process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux";
   const arch = process.arch === "arm64" ? "arm64" : "x64";
@@ -146,12 +196,57 @@ test("official pi-env supplies a remote Durable workspace and remote project con
   t.after(() => host.close());
 
   await host.ensureEndpoint(endpoint("endpoint:ssh", remoteCwd, paths.agentDir, {
-    location: { type: "ssh", host: "test.invalid", user: "tester" },
+    location: { type: "ssh", host: "test.invalid", user: "tester", agent_dir: remoteAgentDir },
   }));
   const submitted = await host.submit("endpoint:ssh", { requestId: "remote-request", content: "inspect remote" });
   const result = await host.waitSubmission("endpoint:ssh", submitted.submissionId);
-  assert.equal(result.status, "done");
-  assert.equal(result.answers.at(-1)?.text, "remote-ready");
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.equal(result.answers.at(-1)?.text, "remote-ready", JSON.stringify(result));
+});
+
+test("Durable Telegram tools call the gateway with stable conversation provenance", async (t) => {
+  const paths = await fixture(t);
+  const faux = fauxProvider();
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const calls = [];
+  faux.setResponses([
+    () => fauxAssistantMessage(
+      fauxToolCall("telepi_send_message", { to: "target", message: "hello" }),
+      { stopReason: "toolUse" },
+    ),
+    (request) => {
+      assert.match(JSON.stringify(request.messages), /Message accepted for target/);
+      return fauxAssistantMessage("sent");
+    },
+  ]);
+  const host = await openDurableHost({
+    storageDir: paths.directory,
+    infrastructureAgentDir: paths.agentDir,
+    projectRoot: paths.directory,
+    models,
+    settingsManager: SettingsManager.inMemory({}),
+    gatewayRequest: async (method, params) => {
+      calls.push({ method, params });
+      return { topic: "target", agent: "other", status: "started" };
+    },
+  });
+  t.after(() => host.close());
+  const ensured = await host.ensureEndpoint({
+    ...endpoint("endpoint:telegram", paths.workspace, paths.agentDir),
+    chatId: "10",
+    topicId: "20",
+    topicName: "source",
+  });
+  const submitted = await host.submit("endpoint:telegram", { requestId: "telegram-request", content: "send it" });
+  const result = await host.waitSubmission("endpoint:telegram", submitted.submissionId);
+  assert.equal(result.answers.at(-1)?.text, "sent");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "telegram.sendMessage");
+  assert.equal(calls[0].params.to, "target");
+  assert.equal(calls[0].params.currentAgentId, "test");
+  assert.equal(calls[0].params.currentTopicName, "source");
+  assert.match(calls[0].params.requestId, new RegExp(`^${ensured.conversationId}:`));
 });
 
 test("SQLite reopen preserves endpoint mapping and conversation identity", async (t) => {

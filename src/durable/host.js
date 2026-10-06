@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomUUID } from "node:crypto";
 import { connectBrokerPeer } from "../broker-ipc.js";
 import { assertDurablePackageVersions } from "./packages.js";
 import { acquireDurableStorageLock } from "./storage-lock.js";
@@ -17,6 +18,7 @@ let closing = false;
 let exitCode = 0;
 const handlers = new Set();
 const operations = new Map();
+const gatewayPending = new Map();
 let sendQueue = Promise.resolve();
 
 try {
@@ -28,6 +30,7 @@ try {
     projectRoot: args.projectRoot,
     onReport: (error) => console.error(`durable report: ${error instanceof Error ? error.stack || error.message : error}`),
     onSshLog: (text) => console.error(`durable ssh: ${String(text).trim()}`),
+    gatewayRequest,
   });
   peer = await connectBrokerPeer(args.socket, { maxFrameBytes: MAX_DURABLE_FRAME_BYTES });
   await peer.send(durableFrame("host.connect", { nonce: args.nonce, pid: process.pid }));
@@ -45,6 +48,14 @@ try {
   while (!closing) {
     const frame = assertDurableFrame(await peer.read());
     if (frame.nonce !== args.nonce) throw new Error("Durable gateway frame generation mismatch");
+    if (frame.type === "gateway.response") {
+      const pending = gatewayPending.get(frame.id);
+      if (!pending) continue;
+      gatewayPending.delete(frame.id);
+      if (frame.success) pending.resolve(frame.data);
+      else pending.reject(new Error(frame.error || "Durable gateway request failed"));
+      continue;
+    }
     if (frame.type !== "request") throw new Error(`Unsupported Durable gateway frame: ${frame.type}`);
     if (!frame.id || !frame.method) throw new Error("Malformed Durable request");
     const handler = handleRequest(frame).finally(() => handlers.delete(handler));
@@ -138,6 +149,27 @@ async function dispatch(method, params) {
     default:
       throw new Error(`Unsupported Durable host method: ${method}`);
   }
+}
+
+function gatewayRequest(method, params = {}, requestContext) {
+  if (closing || !peer) return Promise.reject(new Error("Durable gateway connection is closed"));
+  const id = `host_${randomUUID()}`;
+  return new Promise((resolvePromise, rejectPromise) => {
+    gatewayPending.set(id, { resolve: resolvePromise, reject: rejectPromise });
+    send(durableFrame("gateway.request", {
+      nonce: args.nonce,
+      id,
+      method,
+      params,
+    })).catch((error) => {
+      gatewayPending.delete(id);
+      rejectPromise(error);
+    });
+    requestContext?.signal?.addEventListener?.("abort", () => {
+      if (!gatewayPending.delete(id)) return;
+      rejectPromise(new Error("Durable gateway request was aborted"));
+    }, { once: true });
+  });
 }
 
 function send(frame) {

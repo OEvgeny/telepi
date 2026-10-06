@@ -32,6 +32,7 @@ export class DurableDriver {
     this.log = options.log || ((message) => console.error(message));
     this.readyTimeoutMs = options.readyTimeoutMs ?? DURABLE_READY_TIMEOUT_MS;
     this.maxPendingRequests = options.maxPendingRequests ?? MAX_DURABLE_PENDING_REQUESTS;
+    this.gatewayRequestHandler = options.gatewayRequestHandler;
     this.pending = new Map();
     this.listeners = new Set();
     this.requestSequence = 0;
@@ -233,6 +234,10 @@ export class DurableDriver {
           else pending.reject(new Error(frame.error || "Durable host request failed"));
           continue;
         }
+        if (frame.type === "gateway.request") {
+          void this.handleGatewayRequest(generation, frame);
+          continue;
+        }
         if (frame.type === "event") {
           for (const listener of this.listeners) {
             try {
@@ -247,6 +252,29 @@ export class DurableDriver {
       }
     } catch (error) {
       this.loseGeneration(generation, error);
+    }
+  }
+
+  async handleGatewayRequest(generation, frame) {
+    try {
+      if (!frame.id || !frame.method) throw new Error("Malformed Durable gateway request");
+      if (!this.gatewayRequestHandler) throw new Error("Durable gateway tools are unavailable");
+      const data = await this.gatewayRequestHandler(frame.method, frame.params || {});
+      if (this.generation !== generation || !generation.peer) return;
+      await generation.peer.send(durableFrame("gateway.response", {
+        nonce: generation.nonce,
+        id: frame.id,
+        success: true,
+        data,
+      }));
+    } catch (error) {
+      if (this.generation !== generation || !generation.peer) return;
+      await generation.peer.send(durableFrame("gateway.response", {
+        nonce: generation.nonce,
+        id: frame.id,
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      })).catch(() => undefined);
     }
   }
 

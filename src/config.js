@@ -230,7 +230,7 @@ export function normalizeSessionLocation(value, topicName = "topic") {
   const location = { type, cwd, host };
   const user = String(value?.user || "").trim();
   if (user) location.user = normalizeSshToken(user, `SSH session location for ${topicName} has invalid user`);
-  for (const field of ["identity_file", "config_file"]) {
+  for (const field of ["identity_file", "config_file", "agent_dir"]) {
     const normalized = String(value?.[field] || "").trim();
     if (normalized) {
       if (/["\x00-\x1f\x7f]/.test(normalized)) {

@@ -88,13 +88,13 @@ npm run telepi -- topic:set-backend --name Helper --backend durable
 npm run telepi -- topic:set-backend --name Helper --backend pi
 ```
 
-The first Durable prompt creates a fresh ownerless conversation in `.telepi/durable-host/telepi.sqlite`; it never imports, rewrites, or deletes the topic's JSONL history. The gateway starts one locked multi-conversation host child only when an enabled topic is opted in. Durable currently reuses Pi's model/settings/context/skill services plus Durable's coding tools and activity events. It is a pilot backend: semantic outbox receipts, Telegram-specific tools, full extension parity, automatic compaction policy hooks, and resource governors remain migration gates, so no topic is opted in by default.
+The first Durable prompt creates a fresh ownerless conversation in `.telepi/durable-host/telepi.sqlite`; it never imports, rewrites, or deletes the topic's JSONL history. The gateway starts one locked multi-conversation host child only when an enabled topic is opted in. Durable currently reuses Pi's model/settings/context/skill services plus Durable's coding tools, Durable-native Telegram tools, and activity events. It is a pilot backend: semantic outbox receipts, general extension parity, automatic compaction policy hooks, and resource governors remain migration gates, so no topic is opted in by default.
 
 A Durable topic may run its coding tools in an SSH workspace through the official `@earendil-works/pi-env` transport:
 
 ```bash
 npm run telepi -- topic:set-backend --name Helper --backend durable
-npm run telepi -- topic:set-location --name Helper --type ssh --host <ssh-config-alias> --user <remote-user> --cwd /remote/project [--port 22] [--identity-file <path>] [--ssh-config-file <path>]
+npm run telepi -- topic:set-location --name Helper --type ssh --host <ssh-config-alias> --user <remote-user> --cwd /remote/project [--agent-dir /remote/deployment/effective] [--port 22] [--identity-file <path>] [--ssh-config-file <path>]
 npm run telepi -- topic:ssh-host-key --name Helper
 # Compare a displayed SHA256 fingerprint through an independent channel first:
 npm run telepi -- topic:ssh-host-key --name Helper --accept SHA256:<verified-fingerprint>
@@ -102,7 +102,7 @@ npm run telepi -- topic:ssh-host-key --name Helper --accept SHA256:<verified-fin
 
 `topic:set-location` writes the active, normally gitignored Telepi config, records the replaced Pi session mapping, and rotates to a fresh Durable endpoint; old JSONL and Durable history remains intact. Host keys are kept separately in `.telepi/durable-host/ssh-known-hosts` and are never accepted automatically. Use `topic:ssh-host-key --forget` only before separately scanning and verifying a legitimate replacement key.
 
-Agent identity, agent-wide skills, model credentials, and the Durable database remain local. Project `AGENTS.md`/`CLAUDE.md`, project `.pi/skills`, filesystem operations, and shell commands come from the remote workspace. `pi-env` is transport, not a sandbox: tools have the authority of the configured SSH account, so use a dedicated account or container when isolation is required. SSH locations are rejected by the ordinary Pi backend.
+Without `--agent-dir`, stable agent identity and agent-wide skills remain local while project `AGENTS.md`/`CLAUDE.md` and `.pi/skills` come from the remote workspace. With `--agent-dir`, identity, settings-declared packages, and skills are resolved through SSH from that remote deployment instead; no local agent path is rendered as remote project context. A packaged browser extension is adapted into a Durable `browser` tool whose process, Chromium, sessions, and evidence stay remote. Durable-native Telegram tools remain gateway-local, except image bytes are read from the selected execution environment before upload. Model credentials and the Durable database always remain local. `pi-env` is transport, not a sandbox: remote tools have the authority of the configured SSH account, so use a dedicated account or container when isolation is required. SSH locations are rejected by the ordinary Pi backend.
 
 Start a topic with a fresh pi session without deleting old transcript files:
 

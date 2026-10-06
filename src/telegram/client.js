@@ -120,14 +120,14 @@ export class TelegramClient {
     });
   }
 
-  async sendPhoto({ chatId, topicId, filePath, caption, replyToMessageId }) {
+  async sendPhoto({ chatId, topicId, filePath, fileData, fileName, caption, replyToMessageId }) {
     const form = new FormData();
     form.set("chat_id", String(chatId));
     if (topicId != null) form.set("message_thread_id", String(topicId));
     if (caption) form.set("caption", caption);
     if (replyToMessageId) form.set("reply_to_message_id", String(replyToMessageId));
-    const file = await import("node:fs/promises").then((fs) => fs.readFile(filePath));
-    form.set("photo", new Blob([file]), filePath.split("/").pop() || "photo.jpg");
+    const file = fileData ?? await import("node:fs/promises").then((fs) => fs.readFile(filePath));
+    form.set("photo", new Blob([file]), fileName || filePath?.split("/").pop() || "photo.jpg");
 
     const response = await fetchWithTimeout(`${this.baseUrl}/sendPhoto`, {
       method: "POST",

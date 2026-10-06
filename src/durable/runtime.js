@@ -28,8 +28,13 @@ import { applyHttpProxySettings, configurePiHttpDispatcher } from "../pi/http-di
 import {
   loadLocalAgentContext,
   loadProjectSkillsFromEnv,
+  loadRemoteAgentContextFiles,
   loadRemoteProjectContextFiles,
+  loadSkillRootsFromEnv,
 } from "./remote-context.js";
+import { resolveRemoteAgentResources } from "./remote-agent.js";
+import { RemoteBrowserManager, createRemoteBrowserExtension } from "./remote-browser.js";
+import { createDurableTelegramExtension } from "./telegram-tools.js";
 import {
   sshConnectionKey,
   sshEnvironmentId,
@@ -63,6 +68,11 @@ export const ConversationDoc = defineDoc({
     agentDir: null,
     cwd: null,
     location: { type: "local" },
+    chatId: null,
+    topicId: null,
+    topicName: null,
+    browserPackageRoot: null,
+    remoteSkillRoots: [],
     backendVersion: 1,
     legacySessionId: null,
     skillPaths: [],
@@ -88,9 +98,18 @@ export async function openDurableHost(options) {
     modelsStorePath: join(infrastructureAgentDir, "models-store.json"),
   });
   const prompt = createTelepiPrompt();
+  const browserManager = new RemoteBrowserManager();
+  const remoteBrowser = createRemoteBrowserExtension(browserManager, ConversationDoc);
+  const telegram = createDurableTelegramExtension(
+    options.gatewayRequest || (() => Promise.reject(new Error("Durable gateway tools are unavailable"))),
+    ConversationDoc,
+  );
+  const runtimeExtensions = { prompt, remoteBrowser, telegram };
   const registry = createRegistry();
   registry.install(CodingTools);
   registry.install(prompt);
+  registry.install(remoteBrowser);
+  registry.install(telegram);
   const envs = new ExecutionEnvs(options.projectRoot || process.cwd(), {
     knownHostsFile: join(storageDir, "ssh-known-hosts"),
     onLog: options.onSshLog,
@@ -102,7 +121,7 @@ export async function openDurableHost(options) {
     {
       models: modelRuntime,
       registry,
-      settings: createHarnessSettings(settingsManager, [CodingTools, prompt]),
+      settings: createHarnessSettings(settingsManager, [CodingTools, prompt, telegram]),
       env: envs.env,
       conversationCreated: async (tx, conversation) => {
         await tx.doc(ConversationDoc, conversation.id);
@@ -127,7 +146,10 @@ export async function openDurableHost(options) {
     databasePath,
 
     ensureEndpoint(spec) {
-      return withKeyLock(endpointLocks, spec.endpointKey, () => ensureEndpoint(harness, modelRuntime, spec));
+      return withKeyLock(endpointLocks, spec.endpointKey, async () => {
+        const prepared = await prepareEndpointSpec(spec, envs);
+        return ensureEndpoint(harness, modelRuntime, prepared, runtimeExtensions);
+      });
     },
 
     async watchEndpoint(endpointKey, listener) {
@@ -228,14 +250,30 @@ export async function openDurableHost(options) {
       try {
         await harness.close(context);
       } finally {
-        await envs.cleanup(context);
+        try {
+          await browserManager.cleanup(context);
+        } finally {
+          await envs.cleanup(context);
+        }
       }
     },
   };
   return api;
 }
 
-async function ensureEndpoint(harness, models, spec) {
+async function prepareEndpointSpec(spec, envs) {
+  validateEndpointSpec(spec);
+  if (spec.location?.type !== "ssh" || !spec.location.agent_dir) return spec;
+  const env = envs.remote(spec.location, spec.cwd);
+  const resources = await resolveRemoteAgentResources(env, spec.location.agent_dir, context);
+  return {
+    ...spec,
+    browserPackageRoot: resources.browserPackageRoot,
+    remoteSkillRoots: resources.skillRoots,
+  };
+}
+
+async function ensureEndpoint(harness, models, spec, runtimeExtensions) {
   validateEndpointSpec(spec);
   const existing = await harness.snapshot(EndpointDoc, spec.endpointKey, context);
   if (existing?.conversationId) {
@@ -243,7 +281,7 @@ async function ensureEndpoint(harness, models, spec) {
     if (!conversation) throw new Error(`Durable endpoint ${spec.endpointKey} references a missing conversation`);
     const metadata = await harness.snapshot(ConversationDoc, conversation.id, context);
     assertBindingMatches(spec, metadata);
-    const agent = buildAgentChange(models, spec);
+    const agent = buildAgentChange(models, spec, runtimeExtensions);
     await conversation.commit(async (tx) => {
       await configure(tx, conversation.id, agent);
       const current = await tx.doc(ConversationDoc, conversation.id);
@@ -252,7 +290,7 @@ async function ensureEndpoint(harness, models, spec) {
     return { conversationId: conversation.id, created: false, bindingGeneration: existing.bindingGeneration };
   }
 
-  const agent = buildAgentChange(models, spec);
+  const agent = buildAgentChange(models, spec, runtimeExtensions);
   const conversation = await harness.createConversation({
     ownership: { kind: "ownerless" },
     agent,
@@ -273,7 +311,7 @@ async function ensureEndpoint(harness, models, spec) {
   };
 }
 
-function buildAgentChange(models, spec) {
+function buildAgentChange(models, spec, runtimeExtensions) {
   const parsed = parseModelSpec(spec.modelSpec);
   const model = models.getModel(parsed.provider, parsed.modelId);
   if (!model) throw new Error(`Durable model is unavailable: ${parsed.provider}/${parsed.modelId}`);
@@ -283,7 +321,12 @@ function buildAgentChange(models, spec) {
   return {
     model: { provider: parsed.provider, modelId: parsed.modelId },
     thinkingLevel,
-    extensions: [CodingTools, createTelepiPrompt()],
+    extensions: [
+      CodingTools,
+      runtimeExtensions.prompt,
+      runtimeExtensions.telegram,
+      ...(spec.browserPackageRoot ? [runtimeExtensions.remoteBrowser] : []),
+    ],
     cwd: endpointCwd(spec),
   };
 }
@@ -300,7 +343,9 @@ function createTelepiPrompt() {
         if (!metadata?.agentDir || !metadata.cwd) return undefined;
         const files = metadata.location?.type === "ssh"
           ? [
-              ...loadLocalAgentContext(metadata.agentDir),
+              ...(metadata.location.agent_dir
+                ? await loadRemoteAgentContextFiles(input.env, metadata.location.agent_dir, renderContext)
+                : loadLocalAgentContext(metadata.agentDir)),
               ...await loadRemoteProjectContextFiles(input.env, renderContext),
             ]
           : loadProjectContextFiles({ cwd: metadata.cwd, agentDir: metadata.agentDir });
@@ -312,16 +357,22 @@ function createTelepiPrompt() {
         const metadata = await input.read.snapshot(ConversationDoc, input.conversationId, renderContext);
         if (!metadata?.agentDir || !metadata.cwd) return undefined;
         const isRemote = metadata.location?.type === "ssh";
-        const loaded = loadSkills({
-          cwd: isRemote ? metadata.agentDir : metadata.cwd,
-          agentDir: metadata.agentDir,
-          skillPaths: metadata.skillPaths || [],
-          includeDefaults: true,
-        });
+        const usesRemoteAgentDir = isRemote && Boolean(metadata.location.agent_dir);
+        const loaded = usesRemoteAgentDir
+          ? { skills: [], diagnostics: [] }
+          : loadSkills({
+              cwd: isRemote ? metadata.agentDir : metadata.cwd,
+              agentDir: metadata.agentDir,
+              skillPaths: metadata.skillPaths || [],
+              includeDefaults: true,
+            });
         if (isRemote) {
-          const remote = await loadProjectSkillsFromEnv(input.env, input.env.cwd, renderContext);
+          const [agentSkills, projectSkills] = await Promise.all([
+            loadSkillRootsFromEnv(input.env, metadata.remoteSkillRoots || [], renderContext),
+            loadProjectSkillsFromEnv(input.env, input.env.cwd, renderContext),
+          ]);
           const names = new Set(loaded.skills.map((skill) => skill.name));
-          for (const skill of remote.skills) {
+          for (const skill of [...agentSkills.skills, ...projectSkills.skills]) {
             if (!names.has(skill.name)) {
               loaded.skills.push(skill);
               names.add(skill.name);
@@ -468,6 +519,11 @@ function assignConversationMetadata(metadata, spec) {
   metadata.agentDir = resolve(spec.agentDir);
   metadata.cwd = endpointCwd(spec);
   metadata.location = endpointLocation(spec);
+  metadata.chatId = spec.chatId == null ? null : String(spec.chatId);
+  metadata.topicId = spec.topicId == null ? null : String(spec.topicId);
+  metadata.topicName = spec.topicName || null;
+  metadata.browserPackageRoot = spec.browserPackageRoot || null;
+  metadata.remoteSkillRoots = [...new Set(spec.remoteSkillRoots || [])];
   metadata.backendVersion = 1;
   metadata.legacySessionId = spec.legacySessionId || null;
   metadata.skillPaths = [...new Set((spec.skillPaths || []).map((path) => resolve(path)))];
@@ -505,7 +561,7 @@ function endpointLocation(spec) {
     type: "ssh",
     host: requireString(location.host, "SSH host"),
   };
-  for (const field of ["user", "identity_file", "config_file"]) {
+  for (const field of ["user", "identity_file", "config_file", "agent_dir"]) {
     if (location[field]) normalized[field] = requireString(location[field], `SSH ${field}`);
   }
   if (location.port != null) {

@@ -2,17 +2,25 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
-const PROJECT_INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"];
+const PROJECT_INSTRUCTION_FILES = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
 const MAX_SKILL_DEPTH = 12;
 const MAX_SKILL_ENTRIES = 2_000;
 
 export function loadLocalAgentContext(agentDir) {
-  const files = [];
   for (const name of PROJECT_INSTRUCTION_FILES) {
     const path = join(agentDir, name);
-    if (existsSync(path)) files.push({ path, content: readFileSync(path, "utf8") });
+    if (existsSync(path)) return [{ path, content: readFileSync(path, "utf8") }];
   }
-  return files;
+  return [];
+}
+
+export async function loadRemoteAgentContextFiles(env, agentDir, context) {
+  for (const name of PROJECT_INSTRUCTION_FILES) {
+    const candidate = await joinEnvPath(env, [agentDir, name], context);
+    const content = await readOptionalText(env, candidate, context);
+    if (content != null) return [{ path: candidate, content }];
+  }
+  return [];
 }
 
 export async function loadRemoteProjectContextFiles(env, context) {
@@ -26,7 +34,10 @@ export async function loadProjectContextFromEnv(env, cwd, context) {
     for (const name of PROJECT_INSTRUCTION_FILES) {
       const candidate = await joinEnvPath(env, [directory, name], context);
       const content = await readOptionalText(env, candidate, context);
-      if (content != null) files.push({ path: candidate, content });
+      if (content != null) {
+        files.push({ path: candidate, content });
+        break;
+      }
     }
   }
   return files;
@@ -37,10 +48,16 @@ export async function loadProjectContextFromEnv(env, cwd, context) {
 // the selected ExecutionEnv so their paths are valid to Durable's read tool.
 export async function loadProjectSkillsFromEnv(env, cwd, context) {
   const root = await joinEnvPath(env, [cwd, ".pi", "skills"], context);
+  return loadSkillRootsFromEnv(env, [root], context);
+}
+
+export async function loadSkillRootsFromEnv(env, roots, context) {
   const skills = [];
   const diagnostics = [];
   const state = { entries: 0 };
-  await scanSkillDirectory(env, root, true, 0, skills, diagnostics, state, context);
+  for (const root of roots) {
+    await scanSkillDirectory(env, root, true, 0, skills, diagnostics, state, context);
+  }
   return { skills, diagnostics };
 }
 

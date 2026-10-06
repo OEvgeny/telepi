@@ -15,6 +15,7 @@ import {
 } from "./broker-message.js";
 import { BROKER_PROTOCOL_VERSION, resolveBrokerSocketPath, startBrokerIpcServer } from "./broker-ipc.js";
 import { DurableDriver } from "./durable/driver.js";
+import { createDurableGatewayToolHandler } from "./durable/gateway-tools.js";
 import {
   abortDurableTopic,
   compactDurableTopic,
@@ -65,6 +66,11 @@ async function main() {
     projectRoot: config.project.root,
     infrastructureAgentDir: resolveInfrastructureAgentDir(),
     telegramTokenEnv: config.telegram.bot_token_env,
+    gatewayRequestHandler: createDurableGatewayToolHandler({
+      getConfig,
+      telegram,
+      submitBroker: (request) => handleBrokerSubmission(getConfig(), telegram, inFlight, request),
+    }),
   });
   durableDriver.onEvent((event, data) => handleDurableDriverEvent(getConfig, telegram, inFlight, event, data));
   initPendingQueuePersistence(config, inFlight);

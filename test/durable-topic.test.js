@@ -52,6 +52,9 @@ test("Durable topic specs preserve a fresh endpoint beside immutable legacy hist
     agentDir: "/tmp/telepi-durable-topic/entities/agent",
     cwd: "/tmp/telepi-durable-topic/work/pilot",
     location: { type: "local" },
+    chatId: "10",
+    topicId: "20",
+    topicName: "Pilot",
     modelSpec: "provider/model:high",
     legacySessionId: "legacy-session",
     skillPaths: ["/tmp/telepi-durable-topic/skills/test/SKILL.md"],
@@ -117,7 +120,7 @@ test("topic:set-location configures SSH only for Durable and rotates endpoint co
     join(root, "bin/telepi.js"), "-c", configPath,
     "topic:set-location", "--name", "Remote", "--type", "ssh",
     "--cwd", "/remote/work", "--host", "tablet-alias", "--user", "agent",
-    "--port", "8022", "--identity-file", identityFile,
+    "--port", "8022", "--identity-file", identityFile, "--agent-dir", "/remote/agent/effective",
   ], { cwd: root });
   const updated = readConfig(configPath);
   const topic = updated.topics[0];
@@ -127,6 +130,7 @@ test("topic:set-location configures SSH only for Durable and rotates endpoint co
     user: "agent",
     port: 8022,
     identity_file: identityFile,
+    agent_dir: "/remote/agent/effective",
     cwd: "/remote/work",
   });
   assert.equal(topic.durable_endpoint_generation, 1);

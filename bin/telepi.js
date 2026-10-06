@@ -456,6 +456,7 @@ program
   .option("--port <port>", "SSH port")
   .option("--identity-file <path>", "SSH identity file, absolute or relative to the Telepi project")
   .option("--ssh-config-file <path>", "SSH config file, absolute or relative to the Telepi project")
+  .option("--agent-dir <path>", "Agent directory in the remote environment")
   .option("--session-id <id>", "Fresh legacy Pi session id to preserve rollback history")
   .action(async (options) => {
     const config = load();
@@ -469,6 +470,7 @@ program
       port: options.port,
       identity_file: options.identityFile,
       config_file: options.sshConfigFile,
+      agent_dir: options.agentDir,
     }, topic.name);
     if (location.type === "ssh" && !isDurableTopic(topic)) {
       throwCli(`SSH location for ${topic.name} requires: topic:set-backend --name ${JSON.stringify(topic.name)} --backend durable`);
