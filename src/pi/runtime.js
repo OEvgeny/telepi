@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readSync, readdirSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getAgent, resolvePath, resolveTopicModel, resolveTopicSession } from "../config.js";
 import { applyHttpProxySettings, configurePiHttpDispatcher } from "./http-dispatcher.js";
@@ -16,6 +16,15 @@ export function buildTopicRuntimeSpec(config, topic, options = {}) {
   const agentDir = session.location
     ? session.entityDir
     : resolve(options.agentDir || infrastructureAgentDir);
+  const noContextFiles = agent.context_files === false;
+  const appendSystemPrompt = agent.system_prompt ? [String(agent.system_prompt)] : [];
+  if (noContextFiles) {
+    // Pi's noContextFiles also suppresses the entity AGENTS.md. Preserve the
+    // stable agent identity explicitly while excluding project context files,
+    // matching `pi --no-context-files --append-system-prompt AGENTS.md`.
+    const identityPath = join(session.entityDir, "AGENTS.md");
+    if (existsSync(identityPath)) appendSystemPrompt.unshift(readFileSync(identityPath, "utf8"));
+  }
 
   return {
     agent,
@@ -31,7 +40,8 @@ export function buildTopicRuntimeSpec(config, topic, options = {}) {
       ...(agent.extensions || []),
     ].map((path) => resolvePath(config.project.root, path)))],
     skillPaths: [...new Set((agent.skills || []).map((path) => resolvePath(config.project.root, path)))],
-    appendSystemPrompt: agent.system_prompt ? [String(agent.system_prompt)] : [],
+    appendSystemPrompt,
+    noContextFiles,
   };
 }
 
@@ -68,6 +78,7 @@ export async function createTopicRuntime(pi, config, topic, options = {}) {
         additionalExtensionPaths: spec.extensionPaths,
         additionalSkillPaths: spec.skillPaths,
         appendSystemPrompt: spec.appendSystemPrompt,
+        noContextFiles: spec.noContextFiles,
       },
     });
 

@@ -56,7 +56,7 @@ Create an agent entity:
 npm run telepi -- agent:create --id helper --name Helper
 ```
 
-`agent:create` creates a seed Telegram topic by default, using `manager.chat_id` from `config/telepi.yaml`. Extra topics inherit the agent branding unless `--style`, `--avatar`, or `--color` is supplied.
+`agent:create` creates a seed Telegram topic by default, using `manager.chat_id` from `config/telepi.yaml`. Extra topics inherit the agent branding unless `--style`, `--avatar`, or `--color` is supplied. Use `--no-context-files` for agents that should retain their entity `AGENTS.md` identity without also loading project `AGENTS.md`/`CLAUDE.md` files.
 
 Telegram topic icons are not arbitrary emoji. They must be one of Telegram's forum topic icon stickers; `telepi icons` lists each available emoji and its `custom_emoji_id`. If an agent avatar matches one of those emoji, Telepi uses it as `icon_custom_emoji_id`; otherwise the topic falls back to its color.
 

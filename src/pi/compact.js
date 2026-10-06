@@ -82,6 +82,7 @@ export async function compactPiSession(config, topic, instructions, options = {}
         additionalExtensionPaths: spec.extensionPaths,
         additionalSkillPaths: spec.skillPaths,
         appendSystemPrompt: spec.appendSystemPrompt,
+        noContextFiles: spec.noContextFiles,
       },
     });
     const resolvedModel = modelSpec

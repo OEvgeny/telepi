@@ -157,6 +157,7 @@ program
   .option("--topic-name <name>", "Seed topic name; defaults to the agent display name")
   .option("--cwd <path>", "Seed topic working directory; defaults to the entity root")
   .option("--no-seed-topic", "Create only the entity/config entry, without a Telegram seed topic")
+  .option("--no-context-files", "Do not load project AGENTS.md/CLAUDE.md files; use only explicit agent instructions")
   .option("--color <color>", "Default Telegram topic color name or integer", "blue")
   .option("--style <style>", "Default free-form style metadata")
   .option("--avatar <avatar>", "Default free-form avatar metadata")
@@ -172,6 +173,7 @@ program
       session_id: options.sessionId || options.id,
       skills: options.skill || [],
       extensions: options.extension || [],
+      context_files: options.contextFiles !== false,
       branding: {
         color: options.color,
         style: options.style || null,

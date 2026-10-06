@@ -107,6 +107,21 @@ test("new topic mappings enter location mode with the entity root as agent home 
     await runtime.dispose();
   }
 
+  config.agents.helper.context_files = false;
+  topic.session.id = "helper-no-context";
+  const { runtime: noContextRuntime } = await createTopicRuntime(pi, config, topic, {
+    infrastructureAgentDir: pi.getAgentDir(),
+  });
+  try {
+    assert.deepEqual(noContextRuntime.services.resourceLoader.getAgentsFiles().agentsFiles, []);
+    assert.match(noContextRuntime.session.systemPrompt, /# Helper agent home/);
+    assert.doesNotMatch(noContextRuntime.session.systemPrompt, /# Example location/);
+  } finally {
+    await noContextRuntime.dispose();
+  }
+  config.agents.helper.context_files = true;
+  topic.session.id = "helper-main";
+
   await writeFile(
     join(config.project.sessions_dir, "location-session.jsonl"),
     `${JSON.stringify({ type: "session", id: "helper-main", cwd: join(directory, "projects/example") })}\n`,
