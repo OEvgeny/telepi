@@ -127,7 +127,7 @@ Submit a prompt into the running gateway broker from the command line (used by a
 npm run telepi -- topic:prompt --topic Helper --text "..." [--no-echo] [--from "Name"] [--source "provenance"]
 ```
 
-`topic:prompt` returns after the broker accepts the message. Unless `--no-echo` is used, its synthetic Telegram prompt is labeled with a quoted `📨 Message from <Agent>` header when invoked inside a routed Telepi agent, or `📨 Posted message` for other callers. The broker is the sole owner of per-topic dispatch: it starts an idle session, steers a running session, or queues the message for a safe boundary. Pi sessions also receive a `telepi_send_message` tool that submits one-way messages to the same broker by mapped topic name or uniquely mapped agent id.
+`topic:prompt` returns after the broker accepts the message. Unless `--no-echo` is used, its synthetic Telegram prompt is labeled with a quoted `📨 Message from <Agent>` header when invoked inside a routed Telepi agent, or `📨 Posted message` for other callers. The broker is the sole owner of per-topic dispatch: it starts an idle session, steers a running session, or queues the message for a safe boundary. Pi sessions also receive a `telepi_send_message` tool. Its `to` value should be the exact topic mapping name, which is the routable alias for that topic's specific session. An agent id is accepted only when the agent has exactly one enabled topic; raw session ids are not routable.
 
 The gateway also owns a few Telegram slash commands directly:
 

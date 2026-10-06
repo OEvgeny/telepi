@@ -117,16 +117,17 @@ export default function (pi: ExtensionAPI) {
 		name: "telepi_send_message",
 		label: "Telepi Send Message",
 		description:
-			"Send a one-way text message to another mapped Telepi topic or uniquely mapped agent through the local broker. This does not post text to Telegram and must not target the current topic or agent. The broker starts an idle target, steers a running target, or queues the message at a safe boundary.",
+			"Send a one-way text message through the local broker. Set `to` to the exact mapped topic name to reach that topic's specific session; this mapping name is the session's routable alias. An agent id works only when that agent has exactly one enabled topic. Raw session ids are not routable. This does not post the incoming text to Telegram and must not target the current topic or agent. The broker starts an idle target, steers a running target, or queues the message at a safe boundary.",
 		promptSnippet:
-			"Send a message to another Telepi agent or topic through the local broker",
+			"Send a message to another Telepi session by its exact topic mapping name, or to an agent with only one enabled topic",
 		promptGuidelines: [
-			"Use telepi_send_message when the user asks you to contact or wake another Telepi agent.",
+			"Use telepi_send_message when the user asks you to contact or wake another Telepi agent or one of its sessions.",
+			"When an agent has multiple topics or sessions, address the desired session by its exact topic mapping name. The mapping name is its routable alias; do not use a raw session id or an ambiguous agent id.",
 			"Never use telepi_send_message to notify the user or target your current topic/agent; normal assistant text is delivered to the current Telegram topic.",
 			"telepi_send_message only confirms broker acceptance; it does not wait for the recipient's reply.",
 		],
 		parameters: Type.Object({
-			to: Type.String({ description: "Exact mapped topic name, or an agent id that has exactly one enabled topic." }),
+			to: Type.String({ description: "Exact topic mapping name (the route alias for a specific session), or an agent id only when it has exactly one enabled topic. Do not pass a raw session id." }),
 			message: Type.String({ description: "Text to deliver to the target session." }),
 		}),
 		async execute(toolCallId, params, signal) {
