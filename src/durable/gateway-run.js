@@ -66,6 +66,14 @@ export async function abortDurableTopic(driver, topic) {
   return driver.abort(durableEndpointKey(topic));
 }
 
+export function durableUnavailableMessage(error) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  if (/Durable (?:driver is closing|host (?:is not connected|closed|exited)|connection (?:was )?lost)/i.test(message)) {
+    return "Durable backend is restarting. Please retry in a moment.";
+  }
+  return null;
+}
+
 export function durableEventToPiEvents(event, turnIndex = 0) {
   if (!event || typeof event !== "object") return [];
   if (event.type === "turn_start") return [{ type: "turn_start", turnIndex }];

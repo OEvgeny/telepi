@@ -24,6 +24,15 @@ test("gateway composes the concrete Telegram adapter without owning Bot API mech
   assert.match(adapter, /hydrateEnvelopeMedia/);
 });
 
+test("CLI configuration notices use concise quoted Telegram messages", async () => {
+  const cli = await readFile(resolve(root, "bin/telepi.js"), "utf8");
+  const notify = cli.match(/async function notifyTopicBestEffort[\s\S]*?\n}/)?.[0] || "";
+  assert.match(notify, /sendCliLongMessage/);
+  assert.match(notify, /quote: true/);
+  assert.doesNotMatch(cli, /Execution backend changed for/);
+  assert.doesNotMatch(cli, /Execution location changed for/);
+});
+
 test("active turns expose /stop without a cancel-button callback path", async () => {
   const [gateway, adapter] = await Promise.all([
     readFile(resolve(root, "src/gateway.js"), "utf8"),

@@ -48,15 +48,22 @@ while true; do
   workers="$(awk -v main="$main_pid" '$1 != main { print $1 }' "$cgroup_procs" | sort -n | tr '\n' ' ' | sed 's/ $//')"
   if [[ "$durable_drain_requested" == false && -n "$workers" ]]; then
     durable_workers=""
+    non_durable_workers=""
     for pid in $workers; do
+      cmdline=""
       if [[ -r "/proc/$pid/cmdline" ]]; then
         cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline")"
-        if [[ "$cmdline" == *'/src/durable/host.js'* ]]; then
-          durable_workers+="${durable_workers:+ }$pid"
-        fi
+      fi
+      if [[ "$cmdline" == *'/src/durable/host.js'* ]]; then
+        durable_workers+="${durable_workers:+ }$pid"
+      else
+        non_durable_workers+="${non_durable_workers:+ }$pid"
       fi
     done
-    if [[ -n "$durable_workers" ]]; then
+    # Keep Durable available while unrelated Pi turns finish. Closing it early
+    # creates a potentially long outage where the gateway still accepts
+    # Telegram messages but every Durable request fails as "driver is closing".
+    if [[ -n "$durable_workers" && -z "$non_durable_workers" ]]; then
       echo "asking Durable host to drain and close: $durable_workers" >&2
       if ! (cd "$ROOT" && node bin/telepi.js gateway:drain); then
         echo "Durable host drain failed; no restart attempted" >&2

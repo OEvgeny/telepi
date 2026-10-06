@@ -7,11 +7,13 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { readConfig } from "../src/config.js";
-import { durableEventToPiEvents } from "../src/durable/gateway-run.js";
+import { durableEventToPiEvents, durableUnavailableMessage } from "../src/durable/gateway-run.js";
 import {
   buildDurableEndpointSpec,
   buildDurableSubmission,
   durableEndpointKey,
+  formatBackendSwitchNotice,
+  formatLocationSwitchNotice,
   resolveTopicBackend,
 } from "../src/durable/topic.js";
 
@@ -71,7 +73,19 @@ test("Durable topic specs preserve a fresh endpoint beside immutable legacy hist
   }).requestId, "telegram:10:20:30");
 });
 
+test("Durable configuration notices are short and explicit", () => {
+  assert.equal(formatBackendSwitchNotice("durable"), "Backend: Durable. Pi history preserved.");
+  assert.equal(formatBackendSwitchNotice("pi"), "Backend: Pi. Durable history preserved.");
+  assert.equal(formatLocationSwitchNotice("ssh"), "Location: SSH. Fresh context; previous history preserved.");
+  assert.equal(formatLocationSwitchNotice("local"), "Location: local. Fresh context; previous history preserved.");
+});
+
 test("Durable watch events adapt to Telepi's existing activity mechanics", () => {
+  assert.equal(
+    durableUnavailableMessage(new Error("Durable driver is closing")),
+    "Durable backend is restarting. Please retry in a moment.",
+  );
+  assert.equal(durableUnavailableMessage(new Error("provider failed")), null);
   assert.deepEqual(durableEventToPiEvents({ type: "turn_start" }, 2), [{ type: "turn_start", turnIndex: 2 }]);
   assert.deepEqual(durableEventToPiEvents({
     type: "message_update",

@@ -27,6 +27,8 @@ import { acceptHostKey, forgetHostKey, scanHostKey } from "@earendil-works/pi-en
 import { assertDurablePackageVersions } from "../src/durable/packages.js";
 import {
   TOPIC_BACKENDS,
+  formatBackendSwitchNotice,
+  formatLocationSwitchNotice,
   isDurableTopic,
   resolveTopicBackend,
   rotateDurableEndpoint,
@@ -436,11 +438,7 @@ program
     else topic.backend = backend;
     save(config);
     if (previous !== backend) {
-      const sessionId = resolveTopicSession(config, topic).id;
-      const text = backend === "durable"
-        ? `Execution backend changed for ${topic.name}: Durable. Its Durable conversation is separate; Pi session ${sessionId} remains preserved and is not imported.`
-        : `Execution backend changed for ${topic.name}: Pi. The mapped Pi session ${sessionId} is active again; Durable history remains preserved separately.`;
-      await notifyTopicBestEffort(config, topic, text);
+      await notifyTopicBestEffort(config, topic, formatBackendSwitchNotice(backend));
     }
     console.log(`updated ${topic.name} backend -> ${backend}`);
   });
@@ -501,7 +499,7 @@ program
     await notifyTopicBestEffort(
       config,
       topic,
-      `Execution location changed for ${topic.name}: ${location.type}. A fresh downstream context is active; previous Pi and Durable history remains preserved.`,
+      formatLocationSwitchNotice(location.type),
     );
     console.log(`updated ${topic.name} location -> ${location.type}:${location.cwd} (durable generation ${generation})`);
   });
@@ -934,13 +932,14 @@ function save(config) {
 async function notifyTopicBestEffort(config, topic, text) {
   try {
     const telegram = new TelegramClient(getBotToken(config));
-    await telegram.sendMessage({
+    await sendCliLongMessage(telegram, {
       chatId: topic.chat_id,
       topicId: topic.topic_id,
       text,
+      quote: true,
     });
   } catch (error) {
-    console.error(`warning: session changed but Telegram notification failed for ${topic.name}: ${error.message}`);
+    console.error(`warning: configuration notification failed for ${topic.name}: ${error.message}`);
   }
 }
 

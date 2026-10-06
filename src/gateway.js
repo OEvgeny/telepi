@@ -20,6 +20,7 @@ import {
   abortDurableTopic,
   compactDurableTopic,
   durableEventToPiEvents,
+  durableUnavailableMessage,
   runDurableTopic,
 } from "./durable/gateway-run.js";
 import {
@@ -438,11 +439,12 @@ function startTopicMessage(config, telegram, topic, envelope) {
     run.readyError = error;
     run.resolveReady();
     console.error(`message handling failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
+    const unavailable = isDurableTopic(topic) ? durableUnavailableMessage(error) : null;
     await sendLongMessage(telegram, {
       chatId: envelope.chatId,
       topicId: envelope.topicId,
       replyToMessageId: envelope.messageId,
-      text: `Failed to handle message for ${topic.name}: ${error.message}`,
+      text: unavailable || `Failed to handle message for ${topic.name}: ${error.message}`,
       quote: true,
     }).catch((sendError) => {
       console.error(`failure response failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${sendError.message}`);

@@ -16,6 +16,16 @@ export function resolveTopicBackend(topic) {
   return topic?.backend || TOPIC_BACKEND_PI;
 }
 
+export function formatBackendSwitchNotice(backend) {
+  return backend === TOPIC_BACKEND_DURABLE
+    ? "Backend: Durable. Pi history preserved."
+    : "Backend: Pi. Durable history preserved.";
+}
+
+export function formatLocationSwitchNotice(type) {
+  return `Location: ${type === "ssh" ? "SSH" : "local"}. Fresh context; previous history preserved.`;
+}
+
 export function isDurableTopic(topic) {
   return resolveTopicBackend(topic) === TOPIC_BACKEND_DURABLE;
 }
