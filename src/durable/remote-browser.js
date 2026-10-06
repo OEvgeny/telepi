@@ -219,7 +219,7 @@ export class RemoteBrowserManager {
     await Promise.allSettled(bridges.map(async (bridge) => {
       await bridge.env.exec(
         ["node", bridge.script, "shutdown", bridge.socket, bridge.packageRoot, bridge.cwd, "", bridge.chromiumBin || ""],
-        { timeout: 10 },
+        { timeout: 10, cwd: "/" },
         context,
       );
     }));

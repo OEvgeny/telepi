@@ -150,6 +150,55 @@ test("RPC run finishes when Pi handles a prompt without starting model work", as
   assert.equal(listener, undefined);
 });
 
+test("RPC run settles when its worker exits after prompt acknowledgement", async () => {
+  let eventListener;
+  let exitListener;
+  let stopped = false;
+  const client = {
+    async start() {},
+    onEvent(callback) {
+      eventListener = callback;
+      return () => { eventListener = undefined; };
+    },
+    onExit(callback) {
+      exitListener = callback;
+      return () => { exitListener = undefined; };
+    },
+    async prompt() {
+      return "started";
+    },
+    async abort() {},
+    async steer() {},
+    async stop() {
+      stopped = true;
+    },
+    getStderr() {
+      return "";
+    },
+  };
+
+  const run = await startRpcRun([], {
+    workerPath: "/tmp/telepi-test-worker.js",
+    cwd: process.cwd(),
+    idleTimeoutMs: 0,
+    hardTimeoutMs: 0,
+    initialMessage: "Start",
+    steerMessage: (message) => message,
+    sessionDir: "/tmp/telepi-test-missing-sessions",
+    sessionId: "missing",
+    createRpcClient: () => client,
+  });
+  exitListener(new Error("Agent process exited (code=143 signal=null)"));
+  const result = await run.promise;
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Agent process exited/);
+  assert.equal(stopped, true);
+  assert.equal(eventListener, undefined);
+  assert.equal(exitListener, undefined);
+});
+
 test("RPC abort force-settles a worker that accepts abort but never becomes idle", async () => {
   let listener;
   let abortAccepted = false;

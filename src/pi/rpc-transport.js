@@ -53,6 +53,7 @@ class BrokerRpcClient {
     this.bridge = undefined;
     this.peer = undefined;
     this.eventListeners = [];
+    this.exitListeners = [];
     this.pendingRequests = new Map();
     this.requestId = 0;
     this.stderr = "";
@@ -165,6 +166,18 @@ class BrokerRpcClient {
     return () => {
       const index = this.eventListeners.indexOf(listener);
       if (index >= 0) this.eventListeners.splice(index, 1);
+    };
+  }
+
+  onExit(listener) {
+    if (this.exitError) {
+      queueMicrotask(() => listener(this.exitError));
+      return () => undefined;
+    }
+    this.exitListeners.push(listener);
+    return () => {
+      const index = this.exitListeners.indexOf(listener);
+      if (index >= 0) this.exitListeners.splice(index, 1);
     };
   }
 
@@ -310,9 +323,17 @@ class BrokerRpcClient {
 
   fail(error) {
     const failure = error instanceof Error ? error : new Error(String(error));
+    const firstFailure = !this.exitError;
     this.exitError ||= failure;
     this.ready.reject(this.exitError);
     this.rejectPendingRequests(this.exitError);
+    if (firstFailure) {
+      for (const listener of this.exitListeners.splice(0)) {
+        try {
+          listener(this.exitError);
+        } catch {}
+      }
+    }
   }
 }
 

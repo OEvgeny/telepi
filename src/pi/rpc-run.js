@@ -32,6 +32,7 @@ export async function startRpcRun(args, {
   await client.start();
 
   let unsubscribe;
+  let unsubscribeExit;
   let terminalSettleTimer;
   let abortSettleTimer;
   let requestAbort;
@@ -104,6 +105,8 @@ export async function startRpcRun(args, {
       clearInterval(transcriptTimer);
       unsubscribe?.();
       unsubscribe = undefined;
+      unsubscribeExit?.();
+      unsubscribeExit = undefined;
     };
 
     requestAbort = () => controlTracker.track(async () => {
@@ -224,6 +227,16 @@ export async function startRpcRun(args, {
           streamedTextCount,
         });
       }
+    });
+
+    unsubscribeExit = client.onExit?.((error) => {
+      void finish({
+        ok: false,
+        code: 1,
+        stdout: outputCollector.text() || terminalTranscriptText,
+        stderr: error instanceof Error ? error.message : String(error),
+        streamedTextCount,
+      });
     });
 
     client.prompt(initialMessage).then((disposition) => {
