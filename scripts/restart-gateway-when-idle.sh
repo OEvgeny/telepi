@@ -52,7 +52,7 @@ while true; do
     for pid in $workers; do
       cmdline=""
       if [[ -r "/proc/$pid/cmdline" ]]; then
-        cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline")"
+        cmdline="$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" || true)"
       fi
       if [[ "$cmdline" == *'/src/durable/host.js'* ]]; then
         durable_workers+="${durable_workers:+ }$pid"
