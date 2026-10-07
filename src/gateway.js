@@ -37,6 +37,7 @@ import { resolvePiCliPath, resolvePiPackageIndex } from "./pi/path.js";
 import { acknowledgeTopicMessageDelivery, topicMessageDeliveryId } from "./pi/topic-spec.js";
 import { installTimestampedConsole } from "./logging.js";
 import { isStopCommand, requestTurnStop } from "./turn-control.js";
+import { pumpPendingSteers } from "./topic-queue.js";
 
 installTimestampedConsole();
 
@@ -410,6 +411,7 @@ function startTopicMessage(config, telegram, topic, envelope) {
     pending: [],
     steered: [],
     pendingDrained: false,
+    pendingSteerPump: undefined,
     displayQueue: Promise.resolve(),
     reasoningDisplayMessage: undefined,
     toolDisplayMessages: new Map(),
@@ -467,6 +469,7 @@ function dispatchTopicRun(config, telegram, inFlight, topic, envelope, pending =
   run.pending.push(...pending);
   inFlight.set(key, run);
   markPendingQueueDirty();
+  if (run.pending.length) steerInheritedPendingEnvelopes(config, telegram, topic, run);
   run.promise.finally(() => {
     // A steer is only durable in pi's transcript after its user message_start.
     // Replay any accepted-but-undelivered steers as ordinary queued messages
@@ -482,6 +485,36 @@ function dispatchTopicRun(config, telegram, inFlight, topic, envelope, pending =
     drainPendingEnvelopes(config, telegram, inFlight, topic, run);
   });
   return run;
+}
+
+function steerInheritedPendingEnvelopes(config, telegram, topic, active) {
+  void pumpPendingSteers(active, {
+    canSteer: () => !active.stopRequested && active.acceptsSteering && typeof active.steer === "function",
+    hydrate: (envelope) => telegram.hydrateEnvelope(config, envelope).catch((error) => {
+      console.error(`queued steering media hydration failed chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
+      return envelope;
+    }),
+    steer: (envelope) => steerEnvelopeIntoRun(active, envelope),
+    onSteered: (envelope) => {
+      markPendingQueueDirty();
+      console.error(`steered queued message chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${topicMessageDeliveryId(envelope) || "unknown"}`);
+    },
+    onFailure: (error, envelope) => {
+      console.error(`queued steering unavailable chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
+    },
+  });
+}
+
+async function steerEnvelopeIntoRun(active, envelope) {
+  active.steered.push(envelope);
+  markPendingQueueDirty();
+  try {
+    await active.steer(envelope);
+  } catch (error) {
+    active.steered = active.steered.filter((item) => item !== envelope);
+    markPendingQueueDirty();
+    throw error;
+  }
 }
 
 function drainPendingEnvelopes(config, telegram, inFlight, topic, run) {
@@ -565,15 +598,7 @@ async function steerRunningTopic(config, telegram, inFlight, topic, envelope, ac
     if (active.readyError) throw active.readyError;
     if (active.stopRequested) throw new Error("topic is stopping");
     if (!active.acceptsSteering || !active.steer) throw new Error("topic is not accepting steering");
-    active.steered.push(hydratedEnvelope);
-    markPendingQueueDirty();
-    try {
-      await active.steer(hydratedEnvelope);
-    } catch (error) {
-      active.steered = active.steered.filter((item) => item !== hydratedEnvelope);
-      markPendingQueueDirty();
-      throw error;
-    }
+    await steerEnvelopeIntoRun(active, hydratedEnvelope);
     console.error(`steered chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${topicMessageDeliveryId(hydratedEnvelope) || "unknown"}`);
     return "steered";
   } catch (error) {
