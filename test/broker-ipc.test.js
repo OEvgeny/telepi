@@ -43,6 +43,24 @@ test("broker IPC carries one correlated request over a protected Unix socket", a
   assert.equal((await stat(socketPath)).mode & 0o777, 0o600);
 });
 
+test("broker operations may outlive the initial frame timeout", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "telepi-broker-long-request-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const socketPath = join(directory, "broker.sock");
+  const server = await startBrokerIpcServer({
+    socketPath,
+    initialFrameTimeoutMs: 10,
+    onRequest: async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
+      return { closed: true };
+    },
+  });
+  t.after(() => server.close());
+
+  const response = await requestBroker(socketPath, { id: "long-request" }, { timeoutMs: 200 });
+  assert.deepEqual(response, { closed: true });
+});
+
 test("broker client reports an unavailable socket clearly", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "telepi-broker-missing-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

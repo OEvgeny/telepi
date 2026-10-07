@@ -17,6 +17,7 @@ export async function startBrokerIpcServer({
   onRequest,
   onConnection,
   maxFrameBytes = MAX_BROKER_FRAME_BYTES,
+  initialFrameTimeoutMs = DEFAULT_BROKER_REQUEST_TIMEOUT_MS,
 }) {
   if (!socketPath) throw new Error("broker socket path is required");
   if (typeof onRequest !== "function") throw new Error("broker request handler is required");
@@ -28,7 +29,7 @@ export async function startBrokerIpcServer({
   const server = createServer((socket) => {
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
-    handleServerConnection(socket, { onRequest, onConnection, maxFrameBytes });
+    handleServerConnection(socket, { onRequest, onConnection, maxFrameBytes, initialFrameTimeoutMs });
   });
 
   await new Promise((resolvePromise, rejectPromise) => {
@@ -253,14 +254,17 @@ export function createJsonlPeer(socket, {
   };
 }
 
-async function handleServerConnection(socket, { onRequest, onConnection, maxFrameBytes }) {
-  socket.setTimeout(DEFAULT_BROKER_REQUEST_TIMEOUT_MS, () => socket.destroy());
+async function handleServerConnection(socket, { onRequest, onConnection, maxFrameBytes, initialFrameTimeoutMs }) {
+  socket.setTimeout(initialFrameTimeoutMs, () => socket.destroy());
   const peer = createJsonlPeer(socket, { maxFrameBytes });
   let request;
   try {
     request = await peer.read();
+    // The timeout protects against clients that connect without sending a
+    // frame. Once a valid frame arrives, the operation itself may legitimately
+    // be long-lived (notably a drain waiting for Durable to become idle).
+    socket.setTimeout(0);
     if (onConnection && await onConnection(request, peer)) {
-      socket.setTimeout(0);
       return;
     }
     const data = await onRequest(request);
