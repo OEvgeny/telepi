@@ -189,6 +189,14 @@ test("concrete Telegram adapter initializes and renders through its client bound
     text: `${header}\n\nSynthetic prompt`,
     blockquoteHeader: header,
   });
+  await adapter.setLoggedMessageReaction({
+    chatId: "10",
+    topicId: "20",
+    messageId: "30",
+    emoji: undefined,
+    agent: "test",
+    reason: "message_steered",
+  });
 
   assert.equal(sent[0].message_id, 123);
   assert.ok(calls.some((call) => call.method === "getMe"));
@@ -204,6 +212,9 @@ test("concrete Telegram adapter initializes and renders through its client bound
     length: header.length,
   }]);
   assert.equal(sends[1].payload.parse_mode, undefined);
+  const clearedReaction = calls.find((call) => call.method === "setMessageReaction");
+  assert.equal(clearedReaction.payload.message_id, "30");
+  assert.deepEqual(clearedReaction.payload.reaction, []);
 });
 
 async function waitFor(predicate, timeoutMs = 2_000) {

@@ -498,6 +498,7 @@ function steerInheritedPendingEnvelopes(config, telegram, topic, active) {
     onSteered: (envelope) => {
       markPendingQueueDirty();
       console.error(`steered queued message chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent} message=${topicMessageDeliveryId(envelope) || "unknown"}`);
+      clearQueuedMessageReaction(telegram, topic, envelope, "message_steered");
     },
     onFailure: (error, envelope) => {
       console.error(`queued steering unavailable chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}: ${error.stack || error.message}`);
@@ -531,6 +532,7 @@ function drainPendingEnvelopes(config, telegram, inFlight, topic, run) {
   const [next, ...rest] = queued;
   markPendingQueueDirty();
   console.error(`dispatching queued message chat=${next.chatId} topic=${next.topicId} agent=${topic.agent} message=${topicMessageDeliveryId(next) || "unknown"} remaining=${rest.length}`);
+  clearQueuedMessageReaction(telegram, topic, next, "message_dispatched");
   dispatchTopicRun(config, telegram, inFlight, topic, next, rest);
 }
 
@@ -560,6 +562,20 @@ async function queueEnvelopeForRun(config, telegram, inFlight, topic, run, envel
 
 function setLoggedMessageReaction(telegram, details) {
   return telegram.setLoggedMessageReaction(details);
+}
+
+function clearQueuedMessageReaction(telegram, topic, envelope, reason) {
+  if (envelope.queueAck === false) return;
+  void setLoggedMessageReaction(telegram, {
+    chatId: envelope.chatId,
+    messageId: envelope.messageId,
+    emoji: undefined,
+    topicId: envelope.topicId,
+    agent: topic.agent,
+    reason,
+  }).catch((error) => {
+    console.error(`queued-message reaction clear failed chat=${envelope.chatId} message=${envelope.messageId}: ${error.message}`);
+  });
 }
 
 async function steerRunningTopic(config, telegram, inFlight, topic, envelope, active) {

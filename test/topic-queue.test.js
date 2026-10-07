@@ -19,9 +19,11 @@ function optionsFor(active, delivered, overrides = {}) {
   };
 }
 
-test("gateway starts the inherited-backlog pump on a fresh dispatch", async () => {
+test("gateway starts the inherited-backlog pump and clears queue reactions on admission", async () => {
   const gateway = await readFile(new URL("../src/gateway.js", import.meta.url), "utf8");
   assert.match(gateway, /if \(run\.pending\.length\) steerInheritedPendingEnvelopes\(config, telegram, topic, run\)/);
+  assert.match(gateway, /clearQueuedMessageReaction\(telegram, topic, envelope, "message_steered"\)/);
+  assert.match(gateway, /clearQueuedMessageReaction\(telegram, topic, next, "message_dispatched"\)/);
 });
 
 test("inherited topic backlog steers into the fresh run in FIFO order", async () => {
