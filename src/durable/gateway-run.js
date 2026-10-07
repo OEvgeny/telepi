@@ -97,6 +97,7 @@ export function durableEventToPiEvents(event, turnIndex = 0) {
     return [{ ...event, isError: message?.isError === true }];
   }
   if ([
+    "turn_end",
     "tool_execution_start",
     "tool_execution_update",
     "auto_retry_start",

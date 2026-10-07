@@ -94,6 +94,7 @@ test("Durable watch events adapt to Telepi's existing activity mechanics", () =>
     { type: "message_update", assistantMessageEvent: { type: "thinking_delta" } },
     { type: "message_update", assistantMessageEvent: { type: "text_delta" } },
   ]);
+  assert.deepEqual(durableEventToPiEvents({ type: "turn_end" }), [{ type: "turn_end" }]);
   assert.deepEqual(durableEventToPiEvents({ type: "run_end" }), [{ type: "agent_end" }]);
 });
 
