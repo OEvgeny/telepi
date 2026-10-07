@@ -671,6 +671,19 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
     });
     return;
   }
+  // A transient Telegram failure must not turn a persisted assistant answer
+  // into a silent success. Streaming records exact failed segments so the
+  // gateway can make one final paced delivery attempt after the run settles.
+  if (result.ok && result.undeliveredText) {
+    console.error(`retrying undelivered assistant text chat=${envelope.chatId} topic=${envelope.topicId} agent=${topic.agent}`);
+    await sendLongMessage(telegram, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      replyToMessageId: active.currentReplyToMessageId || envelope.messageId,
+      text: result.undeliveredText,
+    });
+    return;
+  }
   // A turn that delivered its output through a tool (photo, buttons, …) is
   // not "without output" — suppress the placeholder for those.
   if (result.ok && (result.streamedTextCount > 0 || active.displayedMessageCount > 0 || active.telegramDeliveryCount > 0)) return;

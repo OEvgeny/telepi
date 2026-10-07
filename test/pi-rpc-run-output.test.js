@@ -107,6 +107,50 @@ test("RPC run delivers intermediate assistant messages before the final answer",
   assert.equal(stopped, true);
 });
 
+test("RPC run reports assistant text that Telegram did not accept", async () => {
+  let listener;
+  const client = {
+    async start() {},
+    onEvent(callback) {
+      listener = callback;
+      return () => { listener = undefined; };
+    },
+    async prompt() {
+      listener({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_end", content: "Persisted answer" },
+      });
+      listener({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "Persisted answer" }], stopReason: "stop" },
+      });
+      listener({ type: "agent_settled" });
+    },
+    async abort() {},
+    async steer() {},
+    async stop() {},
+    getStderr() { return ""; },
+  };
+  const run = await startRpcRun([], {
+    workerPath: "/tmp/telepi-test-worker.js",
+    cwd: process.cwd(),
+    idleTimeoutMs: 0,
+    hardTimeoutMs: 0,
+    onText: async () => { throw new Error("Telegram sendMessage timed out"); },
+    initialMessage: "Start",
+    steerMessage: (message) => message,
+    sessionDir: "/tmp/telepi-test-missing-sessions",
+    sessionId: "missing",
+    createRpcClient: () => client,
+  });
+  const result = await run.promise;
+
+  assert.equal(result.ok, true);
+  assert.equal(result.streamedTextCount, 0);
+  assert.equal(result.undeliveredText, "Persisted answer");
+  assert.match(result.stderr, /Streaming text delivery failed/);
+});
+
 test("RPC run finishes when Pi handles a prompt without starting model work", async () => {
   let listener;
   let stopped = false;

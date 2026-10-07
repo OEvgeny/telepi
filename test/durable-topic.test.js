@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { readConfig } from "../src/config.js";
-import { durableEventToPiEvents, durableUnavailableMessage } from "../src/durable/gateway-run.js";
+import { durableEventToPiEvents, durableUnavailableMessage, runDurableTopic } from "../src/durable/gateway-run.js";
 import {
   buildDurableEndpointSpec,
   buildDurableSubmission,
@@ -96,6 +96,43 @@ test("Durable watch events adapt to Telepi's existing activity mechanics", () =>
   ]);
   assert.deepEqual(durableEventToPiEvents({ type: "turn_end" }), [{ type: "turn_end" }]);
   assert.deepEqual(durableEventToPiEvents({ type: "run_end" }), [{ type: "agent_end" }]);
+});
+
+test("Durable runs retain assistant text rejected by Telegram for final delivery", async () => {
+  const driver = {
+    infrastructureAgentDir: "/tmp/infrastructure-agent",
+    async ensureEndpoint() {},
+    async submit() { return { submissionId: 7 }; },
+    async waitSubmission() {
+      return { status: "done", answers: [{ entryId: 9, text: "Persisted Durable answer" }] };
+    },
+    async abort() {},
+  };
+  const telegram = {
+    async queueAssistantTextDisplay() { throw new Error("Telegram sendMessage timed out"); },
+  };
+  const active = {
+    steered: [],
+    resolveReady() {},
+  };
+  const result = await runDurableTopic(
+    driver,
+    config,
+    { ...telegram },
+    { ...config.topics[0], backend: "durable" },
+    {
+      chatId: "10",
+      topicId: "20",
+      userId: "owner",
+      userName: "Owner",
+      messageId: "30",
+      text: "Hello",
+    },
+    active,
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.streamedTextCount, 0);
+  assert.equal(result.undeliveredText, "Persisted Durable answer");
 });
 
 test("topic:set-location configures SSH only for Durable and rotates endpoint context", async (t) => {

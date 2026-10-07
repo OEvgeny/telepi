@@ -16,6 +16,7 @@ test("gateway composes the concrete Telegram adapter without owning Bot API mech
 
   assert.match(gateway, /createTelegramAdapter/);
   assert.doesNotMatch(gateway, /TelegramClient|\.getUpdates\(|answerCallbackQuery|updateToEnvelope|hydrateEnvelopeMedia/);
+  assert.match(gateway, /result\.undeliveredText/);
 
   assert.match(adapter, /new TelegramClient/);
   assert.match(adapter, /\.getUpdates\(/);
@@ -109,6 +110,42 @@ test("silent turn status uses one native preformatted Telegram message", async (
   await active.displayQueue;
   assert.ok(calls.some((call) => call.method === "deleteMessage"));
   adapter.stopTurnStatus(active);
+});
+
+test("assistant delivery retries one transient Telegram failure", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "telepi-telegram-retry-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const originalFetch = globalThis.fetch;
+  let sendAttempts = 0;
+  globalThis.fetch = async (url, options = {}) => {
+    const method = new URL(url).pathname.split("/").at(-1);
+    const payload = options.body ? JSON.parse(options.body) : undefined;
+    if (method === "sendMessage" && ++sendAttempts === 1) {
+      throw new TypeError("fetch failed");
+    }
+    const result = method === "getMe"
+      ? { id: 99, first_name: "Test Bot", username: "test_bot" }
+      : method === "sendMessage"
+        ? { message_id: 122, chat: { id: payload.chat_id }, text: payload.text }
+        : true;
+    return new Response(JSON.stringify({ ok: true, result }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const adapter = await createTelegramAdapter({
+    project: { cache_dir: directory },
+    telegram: { bot_token: "test-token" },
+    users: { aliases: {} },
+    topics: [],
+  });
+  const sent = await adapter.sendLongMessage({ chatId: "10", topicId: "20", text: "Retry me" });
+  assert.equal(sendAttempts, 2);
+  assert.equal(sent[0].message_id, 122);
 });
 
 test("concrete Telegram adapter initializes and renders through its client boundary", async (t) => {

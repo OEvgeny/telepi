@@ -42,6 +42,7 @@ export async function startRpcRun(args, {
     let streamedTextCount = 0;
     let textQueue = Promise.resolve();
     let textDeliveryError = "";
+    const undeliveredTexts = [];
     let terminalTranscriptText = "";
     const deliveredTexts = new Set();
     let streamedAssistantParts = [];
@@ -64,6 +65,7 @@ export async function startRpcRun(args, {
             stdout: outputCollector.text() || terminalTranscriptText,
             stderr: message,
             streamedTextCount,
+            undeliveredText: undeliveredTexts.join("\n\n"),
           });
         });
     };
@@ -86,6 +88,7 @@ export async function startRpcRun(args, {
       settled = true;
       cleanup();
       await textQueue;
+      result.streamedTextCount = streamedTextCount;
       // Steering still waits for its correlated response. Abort instead
       // resolves when its clear_queue and abort frames have been accepted by
       // the transport, so a slow Pi waitForIdle() cannot hold shutdown open.
@@ -93,6 +96,7 @@ export async function startRpcRun(args, {
       if (textDeliveryError) {
         result.stderr = `${result.stderr ? `${result.stderr}\n` : ""}Streaming text delivery failed: ${textDeliveryError}`;
       }
+      result.undeliveredText = undeliveredTexts.join("\n\n");
       await client.stop();
       resolvePromise(result);
     };
@@ -133,12 +137,15 @@ export async function startRpcRun(args, {
       const normalized = String(text || "").trim();
       if (!normalized || !onText || deliveredTexts.has(normalized)) return;
       deliveredTexts.add(normalized);
-      streamedTextCount += 1;
       textQueue = textQueue
         .catch(() => undefined)
         .then(() => onText(normalized))
+        .then(() => {
+          streamedTextCount += 1;
+        })
         .catch((error) => {
           textDeliveryError = error.message;
+          undeliveredTexts.push(normalized);
           console.error(`pi assistant text delivery failed: ${error.stack || error.message}`);
         });
     };

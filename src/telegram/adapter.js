@@ -16,6 +16,7 @@ import { advanceTurnStatus, createTurnStatusState, formatTurnStatus } from "../t
 const GATEWAY_TELEGRAM_MIN_INTERVAL_MS = 1000;
 const TOOL_UPDATE_DEBOUNCE_MS = 1000;
 const MAX_GATEWAY_RATE_LIMIT_RETRY_MS = 5000;
+const TRANSIENT_TELEGRAM_RETRY_MS = 1000;
 const TURN_STATUS_SILENCE_MS = 60_000;
 const TURN_STATUS_UPDATE_MS = 60_000;
 const GATEWAY_RATE_LIMITED_TELEGRAM_METHODS = new Set([
@@ -659,12 +660,20 @@ async function sendMessageWithRateLimitRetry(telegram, payload, maxRetries = 1) 
     try {
       return await telegram.sendMessage(payload);
     } catch (error) {
-      const delayMs = rateLimitDelayMs(error);
+      const rateLimitMs = rateLimitDelayMs(error);
+      const transient = isTransientTelegramFailure(error);
+      const delayMs = rateLimitMs ?? (transient ? TRANSIENT_TELEGRAM_RETRY_MS : null);
       if (delayMs == null || attempt >= maxRetries || delayMs > MAX_GATEWAY_RATE_LIMIT_RETRY_MS) throw error;
-      console.error(`send message rate limited chat=${payload.chatId} topic=${payload.topicId}; waiting ${delayMs}ms: ${error.message}`);
+      const reason = rateLimitMs == null ? "transient failure" : "rate limit";
+      console.error(`send message ${reason} chat=${payload.chatId} topic=${payload.topicId}; retrying in ${delayMs}ms: ${error.message}`);
       await sleep(delayMs);
     }
   }
+}
+
+function isTransientTelegramFailure(error) {
+  return /timed out|fetch failed|bad gateway|service unavailable|gateway timeout|\b(?:ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT)\b/i
+    .test(String(error?.message || error || ""));
 }
 
 function rateLimitDelayMs(error) {

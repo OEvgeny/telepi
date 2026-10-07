@@ -28,6 +28,7 @@ export async function runDurableTopic(driver, config, telegram, topic, envelope,
   active.resolveReady();
 
   const deliveredEntries = new Set();
+  const undeliveredTexts = [];
   let streamedTextCount = 0;
   for (let index = 0; index < waits.length; index += 1) {
     const waiting = waits[index];
@@ -46,12 +47,24 @@ export async function runDurableTopic(driver, config, telegram, topic, envelope,
       if (deliveredEntries.has(answer.entryId)) continue;
       deliveredEntries.add(answer.entryId);
       if (!answer.text) continue;
-      telegram.queueAssistantTextDisplay(active, waiting.envelope, answer.text);
-      streamedTextCount += 1;
+      try {
+        await telegram.queueAssistantTextDisplay(active, waiting.envelope, answer.text);
+        streamedTextCount += 1;
+      } catch (error) {
+        undeliveredTexts.push(answer.text);
+        console.error(`Durable assistant text delivery failed: ${error instanceof Error ? error.stack || error.message : error}`);
+      }
     }
   }
 
-  return { ok: true, code: 0, stdout: "", stderr: "", streamedTextCount };
+  return {
+    ok: true,
+    code: 0,
+    stdout: "",
+    stderr: "",
+    streamedTextCount,
+    undeliveredText: undeliveredTexts.join("\n\n"),
+  };
 }
 
 export async function compactDurableTopic(driver, config, topic, instructions) {
