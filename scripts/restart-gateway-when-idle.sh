@@ -7,6 +7,7 @@ STABLE_SECONDS=2
 FORCE=false
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 CGROUP_ROOT="${CGROUP_ROOT:-/sys/fs/cgroup}"
+PROC_ROOT="${PROC_ROOT:-/proc}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,6 +37,23 @@ idle_since=""
 last_workers=""
 durable_drain_requested=false
 
+is_descendant_of_any() {
+  local current="$1"
+  local roots=" $2 "
+  local parent=""
+  while [[ "$current" =~ ^[0-9]+$ && "$current" != "0" ]]; do
+    if [[ "$roots" == *" $current "* ]]; then
+      return 0
+    fi
+    parent="$(awk '/^PPid:/ { print $2; exit }' "$PROC_ROOT/$current/status" 2>/dev/null || true)"
+    if [[ -z "$parent" || "$parent" == "$current" ]]; then
+      break
+    fi
+    current="$parent"
+  done
+  return 1
+}
+
 while true; do
   main_pid="$("$SYSTEMCTL_BIN" --user show "$SERVICE" -p MainPID --value)"
   control_group="$("$SYSTEMCTL_BIN" --user show "$SERVICE" -p ControlGroup --value)"
@@ -47,14 +65,20 @@ while true; do
 
   workers="$(awk -v main="$main_pid" '$1 != main { print $1 }' "$cgroup_procs" | sort -n | tr '\n' ' ' | sed 's/ $//')"
   if [[ "$durable_drain_requested" == false && -n "$workers" ]]; then
+    durable_roots=""
     durable_workers=""
     non_durable_workers=""
     for pid in $workers; do
       cmdline=""
-      if [[ -r "/proc/$pid/cmdline" ]]; then
-        cmdline="$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" || true)"
+      if [[ -r "$PROC_ROOT/$pid/cmdline" ]]; then
+        cmdline="$(tr '\0' ' ' 2>/dev/null < "$PROC_ROOT/$pid/cmdline" || true)"
       fi
       if [[ "$cmdline" == *'/src/durable/host.js'* ]]; then
+        durable_roots+="${durable_roots:+ }$pid"
+      fi
+    done
+    for pid in $workers; do
+      if [[ -n "$durable_roots" ]] && is_descendant_of_any "$pid" "$durable_roots"; then
         durable_workers+="${durable_workers:+ }$pid"
       else
         non_durable_workers+="${non_durable_workers:+ }$pid"
