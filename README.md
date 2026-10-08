@@ -171,6 +171,12 @@ While a routed pi session is running, the gateway sends Telegram `typing` chat a
 
 Agent runs have no destructive timeout by default. A model request, prompt preflight compaction, or long-running tool can legitimately remain silent, so absence of pi events is not treated as failure; the topic stays busy until the run finishes or the user sends `/stop`. Prompt acknowledgement is not subject to the generic RPC control-response timeout because Pi acknowledges only after preflight work completes. A prompt failure never causes Telepi to unlink the active session or silently retry in a fresh one. Operators can explicitly set `idle_timeout_ms` for legacy idle-stop behavior or `hard_timeout_ms` for an absolute maximum runtime.
 
+## Background Commands
+
+Every routed Pi session and Durable conversation receives `telepi_run_command(command, wait_seconds?)`. It starts a non-interactive Bash command as a detached job in the session's selected local or SSH workspace. The tool waits up to 180 seconds by default; if the command is still running, it returns while the command continues and reports persistent output and status paths. Agents can inspect the output path with `read` in a later turn. Set `wait_seconds` to `0` to return immediately.
+
+Job records live under `${XDG_STATE_HOME:-$HOME/.local/state}/telepi/jobs` in the execution environment. The detached command survives the short-lived Pi worker, Durable environment cleanup, and gateway restarts, but it is not restarted after a machine reboot. `/stop` stops the agent turn, not a command already launched with this tool; use ordinary `bash` when turn cancellation should also cancel the command. Interactive commands are not supported.
+
 By default, Telegram receives only assistant text messages. To expose more pi stream message kinds, add an explicit allowlist under `telegram`, an `agent`, or a specific `topic`; topic settings override agent settings, and agent settings override global Telegram settings:
 
 ```yaml

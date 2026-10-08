@@ -171,6 +171,7 @@ test("official pi-env supplies remote agent resources, project context, skills, 
       assert.match(prompt, /"name":"telepi_send_message"/);
       assert.match(prompt, /"name":"telepi_send_image"/);
       assert.match(prompt, /"name":"telepi_buttons"/);
+      assert.match(prompt, /"name":"telepi_run_command"/);
       return fauxAssistantMessage(
         fauxToolCall("browser", { action: "start", url: "https://remote.test" }),
         { stopReason: "toolUse" },

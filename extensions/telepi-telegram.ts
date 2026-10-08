@@ -4,6 +4,12 @@ import { basename, dirname, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import {
+	BACKGROUND_JOB_MAX_WAIT_SECONDS,
+	backgroundJobToolResult,
+	runBackgroundJob,
+} from "../src/background-job.js";
 import { BROKER_PROTOCOL_VERSION, requestBroker } from "../src/broker-ipc.js";
 
 type ButtonInput = string | { label: string; data?: string; url?: string };
@@ -113,6 +119,46 @@ function layoutRows(buttons: Button[]): Button[][] {
 }
 
 export default function (pi: ExtensionAPI) {
+	pi.registerTool({
+		name: "telepi_run_command",
+		label: "Telepi Run Command",
+		description:
+			`Run a non-interactive shell command as a detached job in the current workspace. The tool waits up to ${BACKGROUND_JOB_MAX_WAIT_SECONDS} seconds, then returns while the command continues. Complete output is written to a persistent path that can be inspected with read in a later turn.`,
+		promptSnippet: "Run a potentially long command as a detached job with persistent output",
+		promptGuidelines: [
+			"Use telepi_run_command instead of bash for non-interactive commands likely to run longer than a few minutes or that must survive the current turn.",
+			`It waits at most ${BACKGROUND_JOB_MAX_WAIT_SECONDS} seconds, then returns an output path while the command continues; inspect that path with read later.`,
+			"Do not use telepi_run_command for interactive commands or commands that should be cancelled when the current turn stops.",
+		],
+		parameters: Type.Object({
+			command: Type.String({ description: "Shell command to run in the current workspace." }),
+			wait_seconds: Type.Optional(Type.Integer({
+				minimum: 0,
+				maximum: BACKGROUND_JOB_MAX_WAIT_SECONDS,
+				description: `Seconds to wait before returning. Defaults to ${BACKGROUND_JOB_MAX_WAIT_SECONDS}; use 0 to return immediately.`,
+			})),
+		}),
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			try {
+				const env = new NodeExecutionEnv({ cwd: ctx.cwd });
+				const context = {
+					abortSignal: signal,
+					value: () => undefined,
+					toString: () => "telepi-run-command",
+				};
+				const job = await runBackgroundJob(env, {
+					command: params.command,
+					waitSeconds: params.wait_seconds,
+					cwd: ctx.cwd,
+				}, context);
+				return backgroundJobToolResult(job);
+			} catch (error: any) {
+				const message = error?.message || String(error);
+				return { content: [{ type: "text", text: `Failed: ${message}` }], isError: true, details: { error: message } };
+			}
+		},
+	});
+
 	pi.registerTool({
 		name: "telepi_send_message",
 		label: "Telepi Send Message",

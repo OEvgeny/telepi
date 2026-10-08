@@ -35,6 +35,7 @@ import {
 import { resolveRemoteAgentResources } from "./remote-agent.js";
 import { RemoteBrowserManager, createRemoteBrowserExtension } from "./remote-browser.js";
 import { createDurableTelegramExtension } from "./telegram-tools.js";
+import { createDurableBackgroundJobExtension } from "./background-job-tool.js";
 import {
   sshConnectionKey,
   sshEnvironmentId,
@@ -104,12 +105,14 @@ export async function openDurableHost(options) {
     options.gatewayRequest || (() => Promise.reject(new Error("Durable gateway tools are unavailable"))),
     ConversationDoc,
   );
-  const runtimeExtensions = { prompt, remoteBrowser, telegram };
+  const backgroundJobs = createDurableBackgroundJobExtension();
+  const runtimeExtensions = { prompt, remoteBrowser, telegram, backgroundJobs };
   const registry = createRegistry();
   registry.install(CodingTools);
   registry.install(prompt);
   registry.install(remoteBrowser);
   registry.install(telegram);
+  registry.install(backgroundJobs);
   const envs = new ExecutionEnvs(options.projectRoot || process.cwd(), {
     knownHostsFile: join(storageDir, "ssh-known-hosts"),
     onLog: options.onSshLog,
@@ -121,7 +124,7 @@ export async function openDurableHost(options) {
     {
       models: modelRuntime,
       registry,
-      settings: createHarnessSettings(settingsManager, [CodingTools, prompt, telegram]),
+      settings: createHarnessSettings(settingsManager, [CodingTools, prompt, telegram, backgroundJobs]),
       env: envs.env,
       conversationCreated: async (tx, conversation) => {
         await tx.doc(ConversationDoc, conversation.id);
@@ -325,6 +328,7 @@ function buildAgentChange(models, spec, runtimeExtensions) {
       CodingTools,
       runtimeExtensions.prompt,
       runtimeExtensions.telegram,
+      runtimeExtensions.backgroundJobs,
       ...(spec.browserPackageRoot ? [runtimeExtensions.remoteBrowser] : []),
     ],
     cwd: endpointCwd(spec),
