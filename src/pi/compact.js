@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { assertSupportedPiSdk, resolvePiPackageIndex } from "./path.js";
+import { piCompactionPolicyFactories } from "../compaction-policy.js";
 import {
   buildTopicRuntimeSpec,
   createInfrastructureModelRuntime,
@@ -81,6 +82,7 @@ export async function compactPiSession(config, topic, instructions, options = {}
       resourceLoaderOptions: {
         additionalExtensionPaths: spec.extensionPaths,
         additionalSkillPaths: spec.skillPaths,
+        extensionFactories: piCompactionPolicyFactories(pi.compact),
         appendSystemPrompt: spec.appendSystemPrompt,
         noContextFiles: spec.noContextFiles,
       },

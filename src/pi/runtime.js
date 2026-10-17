@@ -1,6 +1,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getAgent, resolvePath, resolveTopicModel, resolveTopicSession } from "../config.js";
+import { piCompactionPolicyFactories } from "../compaction-policy.js";
 import { applyHttpProxySettings, configurePiHttpDispatcher } from "./http-dispatcher.js";
 
 const MODEL_OPERATION_TIMEOUT_MS = 15_000;
@@ -77,6 +78,7 @@ export async function createTopicRuntime(pi, config, topic, options = {}) {
       resourceLoaderOptions: {
         additionalExtensionPaths: spec.extensionPaths,
         additionalSkillPaths: spec.skillPaths,
+        extensionFactories: piCompactionPolicyFactories(pi.compact),
         appendSystemPrompt: spec.appendSystemPrompt,
         noContextFiles: spec.noContextFiles,
       },

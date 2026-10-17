@@ -24,6 +24,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { RemoteExecutionEnv, sshConnection } from "@earendil-works/pi-env";
+import { createDurableCompactionModels } from "../compaction-policy.js";
 import { applyHttpProxySettings, configurePiHttpDispatcher } from "../pi/http-dispatcher.js";
 import {
   loadLocalAgentContext,
@@ -98,6 +99,10 @@ export async function openDurableHost(options) {
     modelsPath: join(infrastructureAgentDir, "models.json"),
     modelsStorePath: join(infrastructureAgentDir, "models-store.json"),
   });
+  // Durable uses completeSimple only for its built-in summarization task;
+  // ordinary turns use streamSimple. Wrap that one boundary so the same
+  // Telepi-wide compaction policy applies without changing normal requests.
+  const harnessModels = createDurableCompactionModels(modelRuntime);
   const prompt = createTelepiPrompt();
   const browserManager = new RemoteBrowserManager();
   const remoteBrowser = createRemoteBrowserExtension(browserManager, ConversationDoc);
@@ -122,7 +127,7 @@ export async function openDurableHost(options) {
   const harness = await Harness.open(
     await openNodeSqliteStorage(databasePath),
     {
-      models: modelRuntime,
+      models: harnessModels,
       registry,
       settings: createHarnessSettings(settingsManager, [CodingTools, prompt, telegram, backgroundJobs]),
       env: envs.env,

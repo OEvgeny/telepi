@@ -130,6 +130,15 @@ npm run telepi -- session:limit --unlimited
 
 After a successful compaction, a transcript at or above the configured limit is checkpointed into a fresh session containing only pi's retained tail, the successful compaction entry, and subsequent context entries. The topic is relinked only after the checkpoint produces the same model-facing message context. The original transcript remains unchanged in session history and the new header records it as `parentSession`.
 
+`extensions/compaction-reasoning-budget.js` caps Strata reasoning at 512 tokens only for Pi's stock compaction operation. Pi's completion limit is shared by reasoning and the visible summary, so this deliberately leaves most of the allowance for the checkpoint itself. The extension intercepts manual and automatic compaction and calls Pi's unchanged `compact()` implementation through an overridden model stream; this is necessary because Pi's built-in summary stream bypasses `before_provider_request`. Telepi preloads the same policy for every routed Pi profile, regardless of agent directory or working directory; ordinary turns are unchanged. Durable applies the same request override only at its summarization model boundary.
+
+Direct Pi can use the identical policy by linking the extension into its agent directory (repeat for a non-default `PI_CODING_AGENT_DIR`):
+
+```bash
+ln -s /path/to/telepi/extensions/compaction-reasoning-budget.js \
+  ~/.pi/agent/extensions/compaction-reasoning-budget.js
+```
+
 Send a direct Telegram message to a topic without invoking pi or the gateway:
 
 ```bash
