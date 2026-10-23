@@ -10,7 +10,17 @@ async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), "telepi-durable-gateway-tools-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const calls = [];
+  const recorded = [];
   const telegram = {
+    recordSentMessages(message, sent) {
+      recorded.push({ message, sent });
+    },
+    findTelegramMessageRecord(chatId, messageId) {
+      if (chatId === "10" && messageId === "39") {
+        return { chat_id: "10", topic_id: "20", message_id: "39", text: "remembered", direction: "incoming" };
+      }
+      return null;
+    },
     client: {
       async sendPhoto(params) {
         calls.push({ method: "photo", params });
@@ -24,14 +34,17 @@ async function fixture(t) {
   };
   const submissions = [];
   const handler = createDurableGatewayToolHandler({
-    getConfig: () => ({ project: { cache_dir: directory } }),
+    getConfig: () => ({
+      project: { cache_dir: directory },
+      topics: [{ name: "source", agent: "source-agent", chat_id: "10", topic_id: "20", enabled: true }],
+    }),
     telegram,
     submitBroker: async (request) => {
       submissions.push(request);
       return { topic: "target", agent: "other", status: "started" };
     },
   });
-  return { directory, calls, submissions, handler };
+  return { directory, calls, recorded, submissions, handler };
 }
 
 test("Durable Telegram gateway tools preserve broker provenance and deduplicate requests", async (t) => {
@@ -62,7 +75,7 @@ test("Durable Telegram gateway tools preserve broker provenance and deduplicate 
 });
 
 test("Durable Telegram gateway tools upload remote bytes and persist button callbacks", async (t) => {
-  const { directory, calls, handler } = await fixture(t);
+  const { directory, calls, recorded, handler } = await fixture(t);
   const image = await handler("telegram.sendImage", {
     requestId: "image",
     chatId: "10",
@@ -94,4 +107,22 @@ test("Durable Telegram gateway tools upload remote bytes and persist button call
     { label: "Yes", data: null },
     { label: "Docs", data: null },
   ]);
+  assert.equal(recorded.length, 2);
+  assert.equal(recorded[0].message.caption, undefined);
+  assert.equal(recorded[1].message.text, "Choose");
+});
+
+test("Durable Telegram gateway tool looks up a current-topic message", async (t) => {
+  const { handler } = await fixture(t);
+  const found = await handler("telegram.getMessage", {
+    requestId: "lookup",
+    chatId: "10",
+    topicId: "20",
+    agentId: "source-agent",
+    topicName: "source",
+    messageId: "39",
+  });
+
+  assert.equal(found.found, true);
+  assert.equal(found.text, "remembered");
 });

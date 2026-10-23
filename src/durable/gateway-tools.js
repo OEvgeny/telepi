@@ -3,6 +3,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { BROKER_PROTOCOL_VERSION } from "../broker-ipc.js";
 import { normalizeBrokerSubmitRequest } from "../broker-message.js";
+import { lookupTelegramMessage } from "../telegram/message-lookup.js";
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
@@ -30,6 +31,9 @@ export function createDurableGatewayToolHandler({ getConfig, telegram, submitBro
 }
 
 async function dispatch(method, params, services) {
+  if (method === "telegram.getMessage") {
+    return lookupTelegramMessage(services.getConfig(), services.telegram, params);
+  }
   if (method === "telegram.sendMessage") return sendMessage(params, services);
   if (method === "telegram.sendImage") return sendImage(params, services);
   if (method === "telegram.sendButtons") return sendButtons(params, services);
@@ -67,17 +71,20 @@ async function sendImage(params, { telegram }) {
   const bytes = Buffer.from(required(params.dataBase64, "image data"), "base64");
   if (!bytes.length) throw new Error("Image is empty");
   if (bytes.length > MAX_IMAGE_BYTES) throw new Error(`Image is too large (max ${MAX_IMAGE_BYTES} bytes)`);
+  const topicId = nullable(params.topicId);
+  const caption = params.caption ? String(params.caption).slice(0, 1024) : undefined;
   const sent = await telegram.client.sendPhoto({
     chatId,
-    topicId: nullable(params.topicId),
+    topicId,
     fileData: bytes,
     fileName: safeFileName(params.fileName),
-    caption: params.caption ? String(params.caption).slice(0, 1024) : undefined,
+    caption,
     replyToMessageId: nullable(params.replyToMessageId),
   });
+  telegram.recordSentMessages({ chatId, topicId, caption }, [sent]);
   return {
     chatId: String(chatId),
-    topicId: nullable(params.topicId),
+    topicId,
     messageId: String(sent.message_id),
   };
 }
@@ -94,12 +101,14 @@ async function sendButtons(params, { getConfig, telegram }) {
         : { text: button.label, callback_data: `telepi:btn:${token}:${buttons.indexOf(button)}` }
     ))),
   };
+  const text = String(params.text || "").slice(0, 4096);
   const sent = await telegram.client.sendMessage({
     chatId,
     topicId,
-    text: String(params.text || "").slice(0, 4096),
+    text,
     replyMarkup,
   });
+  telegram.recordSentMessages({ chatId, topicId, text, agentId: params.agentId }, [sent]);
   const config = getConfig();
   const path = resolve(config.project.cache_dir, "button-callbacks.jsonl");
   await mkdir(dirname(path), { recursive: true });

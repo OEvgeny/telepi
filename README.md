@@ -210,7 +210,11 @@ Enabled `assistant/reasoning` updates are coalesced into one italic Telegram mes
 
 Outbound messages are converted from model markdown to Telegram MarkdownV2 using a vendored copy of [telegram-markdown-v2](https://github.com/AndyRightNow/telegram-markdown-v2) (see `vendor/`). If conversion fails or inflates a chunk past Telegram's 4096-char limit, the chunk is sent as plain text instead — models are never restricted in what they can output.
 
-## Attachments
+## Reply lookup and attachments
+
+Telegram usually includes the replied-to text in an incoming update, and Telepi puts it in `reply_to_text`. When an agent has only `reply_to_message_id`, it can call `telepi_get_message(message_id)` to look up the text or caption in Telepi's local recent-message archive. Lookup is restricted to the current topic. Telegram's Bot API has no arbitrary get-by-id method, so a message older than the local archive cannot be recovered by the tool.
+
+Observed inbound messages and successfully sent gateway messages are indexed in `.telepi/cache/sent-messages.jsonl`; malformed historical rows are skipped and the file is bounded at gateway startup.
 
 Inbound Telegram photos, image documents, and other uploads are downloaded under `.telepi/cache/` and listed in the prompt with their local path, filename, MIME type, and size. Agents view them with pi's `read` tool — vision-capable models see image content by reading the file path; nothing is inlined as base64.
 

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { findTopic, getBotToken } from "../config.js";
 import {
@@ -9,6 +9,7 @@ import {
 } from "./client.js";
 import { blockquoteEntities, italicEntities, toTelegramMarkdownV2 } from "./format.js";
 import { advanceTurnStatus, createTurnStatusState, formatTurnStatus } from "../turn-status.js";
+import { TelegramMessageIndex } from "./message-index.js";
 
 // Concrete in-process Telegram orchestration for the gateway. This module is
 // intentionally not a generalized transport interface; its methods follow the
@@ -43,6 +44,7 @@ class TelegramAdapter {
     this.client = client;
     this.me = me;
     this.sentMessageIndexPath = undefined;
+    this.messageIndex = undefined;
     this.typingByTopic = new Map();
   }
 
@@ -105,6 +107,7 @@ class TelegramAdapter {
           agentId: topic.agent,
           agentName: config.agents?.[topic.agent]?.name || topic.name,
         });
+        this.recordIncomingMessage(envelope);
         await onMessage(config, topic, envelope);
       }
     }
@@ -188,38 +191,58 @@ class TelegramAdapter {
 
   initSentMessageIndex(config) {
     this.sentMessageIndexPath = resolve(config.project.cache_dir, "sent-messages.jsonl");
-    mkdirSync(resolve(config.project.cache_dir), { recursive: true });
-    if (!existsSync(this.sentMessageIndexPath)) return;
-    const lines = readFileSync(this.sentMessageIndexPath, "utf8").split("\n").filter(Boolean);
-    if (lines.length > 4000) {
-      writeFileSync(this.sentMessageIndexPath, lines.slice(-2000).join("\n") + "\n");
-    }
+    this.messageIndex = new TelegramMessageIndex(this.sentMessageIndexPath);
+    this.messageIndex.init();
+  }
+
+  recordIncomingMessage(envelope) {
+    if (!this.messageIndex) return;
+    this.messageIndex.record({
+      chat_id: envelope.chatId,
+      message_id: envelope.messageId,
+      topic_id: envelope.topicId,
+      direction: "incoming",
+      text: envelope.text,
+      user_id: envelope.userId,
+      user_name: envelope.userName,
+      attachments: envelope.telegramAttachments || envelope.attachments,
+    });
+    const replied = envelope.replyTo;
+    if (!replied?.messageId || (!replied.text && !replied.attachments?.length)) return;
+    this.messageIndex.record({
+      chat_id: replied.chatId || envelope.chatId,
+      message_id: replied.messageId,
+      topic_id: replied.topicId ?? envelope.topicId,
+      direction: replied.isBot ? "outgoing" : "reply_context",
+      text: replied.text,
+      user_id: replied.userId,
+      user_name: replied.userName,
+      agent_id: replied.agentId,
+      attachments: replied.attachments,
+    });
   }
 
   recordSentMessages(message, sentMessages) {
-    if (!this.sentMessageIndexPath) return;
+    if (!this.messageIndex) return;
     for (const sent of sentMessages) {
       if (!sent?.message_id) continue;
-      appendFileSync(this.sentMessageIndexPath, JSON.stringify({
+      this.messageIndex.record({
         chat_id: String(sent.chat?.id || message.chatId),
         message_id: String(sent.message_id),
-        topic_id: message.topicId == null ? null : String(message.topicId),
-        text: String(sent.text || message.text || "").slice(0, 150),
-      }) + "\n");
+        topic_id: message.topicId,
+        direction: "outgoing",
+        text: String(sent.text || sent.caption || message.text || message.caption || ""),
+        agent_id: message.agentId,
+      });
     }
   }
 
   findSentMessageRecord(chatId, messageId) {
-    if (!this.sentMessageIndexPath || !existsSync(this.sentMessageIndexPath)) return null;
-    const lines = readFileSync(this.sentMessageIndexPath, "utf8").split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (!lines[i]) continue;
-      try {
-        const record = JSON.parse(lines[i]);
-        if (record.chat_id === String(chatId) && record.message_id === String(messageId)) return record;
-      } catch {}
-    }
-    return null;
+    return this.messageIndex?.find(chatId, messageId) || null;
+  }
+
+  findTelegramMessageRecord(chatId, messageId) {
+    return this.messageIndex?.find(chatId, messageId) || null;
   }
 
   async handleCallbackQuery(config, query, onButtonMessage) {

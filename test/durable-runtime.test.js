@@ -168,6 +168,7 @@ test("official pi-env supplies remote agent resources, project context, skills, 
       assert.match(prompt, /remote-skill/);
       assert.match(prompt, /browser-skill/);
       assert.match(prompt, /"name":"browser"/);
+      assert.match(prompt, /"name":"telepi_get_message"/);
       assert.match(prompt, /"name":"telepi_send_message"/);
       assert.match(prompt, /"name":"telepi_send_image"/);
       assert.match(prompt, /"name":"telepi_buttons"/);

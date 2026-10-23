@@ -9,6 +9,37 @@ export function createDurableTelegramExtension(gatewayRequest, metadataDoc) {
     name: "telepi-telegram",
     tools: [
       defineTool({
+        name: "telepi_get_message",
+        label: "Telepi Get Message",
+        description: "Fetch the text or caption of a Telegram message by its numeric message identifier from Telepi's local recent-message archive. Use this when reply context has reply_to_message_id but no reply_to_text, or when the user asks what a referenced message said. Lookup is restricted to the current topic; arbitrary uncached messages cannot be fetched from Telegram's Bot API.",
+        promptSnippet: "Fetch locally archived Telegram message text by message id in the current topic",
+        promptGuidelines: [
+          "Use telepi_get_message when reply_to_message_id is present without reply_to_text and the referenced text matters.",
+          "The tool is limited to the current topic and may not have old uncached messages.",
+        ],
+        parameters: Type.Object({
+          message_id: Type.String(),
+        }),
+        replay: "safe",
+        executionMode: "sequential",
+        execute: async (params, api, context) => {
+          try {
+            const current = await metadata(api, context);
+            const result = await gatewayRequest("telegram.getMessage", {
+              requestId: `${api.conversationId}:${api.callId}`,
+              messageId: params.message_id,
+              chatId: current.chatId,
+              topicId: current.topicId,
+              agentId: current.agentId,
+              topicName: current.topicName,
+            }, context);
+            return messageLookupResult(result);
+          } catch (error) {
+            return failed(error);
+          }
+        },
+      }),
+      defineTool({
         name: "telepi_send_message",
         label: "Telepi Send Message",
         description: "Send a one-way text message through the local broker. Set `to` to the exact mapped topic name to reach that topic's specific session; an agent id works only when uniquely mapped. Raw session ids are not routable. This does not echo the incoming text to Telegram and must not target the current topic or agent.",
@@ -145,6 +176,22 @@ async function readRemoteFile(env, path, context) {
 
 function remoteBaseName(path) {
   return String(path).split(/[\\/]/).filter(Boolean).at(-1) || "photo.jpg";
+}
+
+function messageLookupResult(result) {
+  if (!result.found) {
+    return {
+      content: [{ type: "text", text: `Telegram message ${result.messageId} is not in Telepi's local archive. ${result.limitation}` }],
+      details: result,
+    };
+  }
+  const author = result.agentId || result.userName || result.direction || "unknown author";
+  const text = result.text || "[The archived message has no text or caption.]";
+  const suffix = result.textTruncated ? "\n\n[Archived text was truncated.]" : "";
+  return {
+    content: [{ type: "text", text: `Telegram message ${result.messageId} from ${author}:\n\n${text}${suffix}` }],
+    details: result,
+  };
 }
 
 function failed(error) {

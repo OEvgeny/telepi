@@ -160,6 +160,49 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "telepi_get_message",
+		label: "Telepi Get Message",
+		description:
+			"Fetch the text or caption of a Telegram message by its numeric message identifier from Telepi's local recent-message archive. Use this when Telegram reply context contains `reply_to_message_id` but no `reply_to_text`, or when the user asks what a referenced message said. Lookup is restricted to the current topic. Telegram's Bot API cannot retrieve arbitrary uncached messages, so old messages may be unavailable.",
+		promptSnippet: "Fetch locally archived Telegram message text by message id in the current topic",
+		promptGuidelines: [
+			"Use telepi_get_message when a Telegram reply provides reply_to_message_id without reply_to_text and the referenced text matters to the request.",
+			"Pass only the numeric Telegram message id. The tool cannot read another topic and may not have messages older than Telepi's local archive.",
+		],
+		parameters: Type.Object({
+			message_id: Type.String({ description: "Numeric Telegram message identifier, such as the value of reply_to_message_id." }),
+		}),
+		async execute(toolCallId, params, signal) {
+			const socketPath = process.env.TELEPI_BROKER_SOCKET;
+			if (!socketPath) throw new Error("TELEPI_BROKER_SOCKET is not configured for this session");
+			const request = {
+				version: BROKER_PROTOCOL_VERSION,
+				type: "telegram_message_get",
+				id: `${process.env.TELEPI_AGENT_ID || "unknown-agent"}:${toolCallId}`,
+				messageId: params.message_id,
+				chatId: process.env.TELEPI_CHAT_ID || "",
+				topicId: process.env.TELEPI_TOPIC_ID || null,
+				agentId: process.env.TELEPI_AGENT_ID || "",
+				topicName: process.env.TELEPI_TOPIC_NAME || "",
+			};
+			const result = await requestBroker(socketPath, request, { signal });
+			if (!result.found) {
+				return {
+					content: [{ type: "text", text: `Telegram message ${result.messageId} is not in Telepi's local archive. ${result.limitation}` }],
+					details: result,
+				};
+			}
+			const author = result.agentId || result.userName || result.direction || "unknown author";
+			const text = result.text || "[The archived message has no text or caption.]";
+			const suffix = result.textTruncated ? "\n\n[Archived text was truncated.]" : "";
+			return {
+				content: [{ type: "text", text: `Telegram message ${result.messageId} from ${author}:\n\n${text}${suffix}` }],
+				details: result,
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "telepi_send_message",
 		label: "Telepi Send Message",
 		description:

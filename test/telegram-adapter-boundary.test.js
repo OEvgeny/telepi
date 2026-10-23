@@ -199,6 +199,7 @@ test("concrete Telegram adapter initializes and renders through its client bound
   });
 
   assert.equal(sent[0].message_id, 123);
+  assert.equal(adapter.findTelegramMessageRecord("10", "123").text, `${header}\n\nSynthetic prompt`);
   assert.ok(calls.some((call) => call.method === "getMe"));
   const commands = calls.find((call) => call.method === "setMyCommands");
   assert.ok(commands.payload.commands.some((command) => command.command === "stop"));

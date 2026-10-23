@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { createReloadingConfigReader, findTopicByName, resolveTopicSession, setTopicSessionId } from "./config.js";
 import { createTelegramAdapter } from "./telegram/adapter.js";
+import { lookupTelegramMessage } from "./telegram/message-lookup.js";
 import { parseCompactCommand } from "./pi/compact.js";
 import { advanceModelError } from "./pi/model-error.js";
 import {
@@ -191,6 +192,9 @@ async function startBrokerApi(getConfig, telegram, inFlight, socketPath) {
       if (value?.version === BROKER_PROTOCOL_VERSION && value?.type === "durable_host_drain") {
         await durableDriver.drainAndClose();
         return { closed: true };
+      }
+      if (value?.version === BROKER_PROTOCOL_VERSION && value?.type === "telegram_message_get") {
+        return lookupTelegramMessage(getConfig(), telegram, value);
       }
       const request = normalizeBrokerSubmitRequest(value);
       const signature = JSON.stringify(request);
