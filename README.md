@@ -210,6 +210,12 @@ Enabled `assistant/reasoning` updates are coalesced into one italic Telegram mes
 
 Outbound messages are converted from model markdown to Telegram MarkdownV2 using a vendored copy of [telegram-markdown-v2](https://github.com/AndyRightNow/telegram-markdown-v2) (see `vendor/`). If conversion fails or inflates a chunk past Telegram's 4096-char limit, the chunk is sent as plain text instead — models are never restricted in what they can output.
 
+## Web search
+
+`extensions/deepseek-web.ts` provides Pi with `web_search({ queries })` and `web_fetch({ url })`, following DeepSeek Harness's model-facing contract. It calls DeepSeek's direct Search and Fetch endpoints, resolves the existing `deepseek` credential through Pi's model registry, and never copies the key into Telepi configuration. Configure that credential with `/login deepseek`.
+
+A search accepts up to four complementary queries and returns at most eight deduplicated sources with URLs, summaries, and publication dates. Fetch returns page Markdown with a bounded output. Both tools label remote content as untrusted and are read-only, open-world operations.
+
 ## Reply lookup and attachments
 
 Telegram usually includes the replied-to text in an incoming update, and Telepi puts it in `reply_to_text`. When an agent has only `reply_to_message_id`, it can call `telepi_get_message(message_id)` to look up the text or caption in Telepi's local recent-message archive. Lookup is restricted to the current topic. Telegram's Bot API has no arbitrary get-by-id method, so a message older than the local archive cannot be recovered by the tool.
