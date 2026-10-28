@@ -206,6 +206,8 @@ telepi agent:display-messages --id <agent> --clear
 
 Enabled `assistant/reasoning` updates are coalesced into one italic Telegram message per user turn. Later reasoning summaries edit and append to that message instead of creating a noisy sequence; a continuation is used only if Telegram's message-size limit is reached.
 
+Both backends deliver each assistant message as it is produced, not when the turn ends. A Pi run sends on every completed text block, and a Durable run sends each assistant entry as the conversation commits it, so narration before a tool call reaches Telegram while the model is still working. The Durable live watch and the settled submission can name the same entry, and a watch overflow replays entries, so delivery is deduplicated by text: a Telegram failure leaves the text retryable, and a repeated entry is never sent twice.
+
 ## Formatting
 
 Outbound messages are converted from model markdown to Telegram MarkdownV2 using a vendored copy of [telegram-markdown-v2](https://github.com/AndyRightNow/telegram-markdown-v2) (see `vendor/`). If conversion fails or inflates a chunk past Telegram's 4096-char limit, the chunk is sent as plain text instead — models are never restricted in what they can output.

@@ -24,46 +24,110 @@ export async function runDurableTopic(driver, config, telegram, topic, envelope,
     if (recoveryIndex >= 0) active.steered.splice(recoveryIndex, 1);
   };
   active.acceptsSteering = true;
-  await submit(envelope, "followUp");
-  active.resolveReady();
+  const textDelivery = createAssistantTextDelivery(telegram, active, active.envelope || envelope);
+  // Durable streams each assistant entry as it commits. Deliver that text at
+  // the commit, not when the submission settles, so narration before a tool
+  // call reaches Telegram while the model is still working.
+  const unsubscribe = typeof driver.onEvent === "function"
+    ? driver.onEvent((event, data) => {
+      if (event !== "conversation.events" || data?.endpointKey !== endpoint.endpointKey) return;
+      if (!Array.isArray(data.events)) return;
+      for (const durableEvent of data.events) {
+        if (durableEvent?.type !== "message_end") continue;
+        const text = assistantTextFromEntry(durableEvent.entry);
+        if (text) void textDelivery.deliver(text).catch(() => undefined);
+      }
+    })
+    : undefined;
 
-  const deliveredEntries = new Set();
-  const undeliveredTexts = [];
-  let streamedTextCount = 0;
-  for (let index = 0; index < waits.length; index += 1) {
-    const waiting = waits[index];
-    const result = await driver.waitSubmission(endpoint.endpointKey, waiting.submissionId);
-    if (result.status !== "done") {
-      if (active.stopRequested && result.reason === "aborted") continue;
-      return {
-        ok: false,
-        code: 1,
-        stdout: "",
-        stderr: `Durable submission was not answered: ${result.reason || "unknown"}`,
-        streamedTextCount,
-      };
-    }
-    for (const answer of result.answers || []) {
-      if (deliveredEntries.has(answer.entryId)) continue;
-      deliveredEntries.add(answer.entryId);
-      if (!answer.text) continue;
-      try {
-        await telegram.queueAssistantTextDisplay(active, waiting.envelope, answer.text);
-        streamedTextCount += 1;
-      } catch (error) {
-        undeliveredTexts.push(answer.text);
-        console.error(`Durable assistant text delivery failed: ${error instanceof Error ? error.stack || error.message : error}`);
+  try {
+    await submit(envelope, "followUp");
+    active.resolveReady();
+
+    const deliveredEntries = new Set();
+    const undeliveredTexts = [];
+    let streamedTextCount = 0;
+    for (let index = 0; index < waits.length; index += 1) {
+      const waiting = waits[index];
+      const result = await driver.waitSubmission(endpoint.endpointKey, waiting.submissionId);
+      if (result.status !== "done") {
+        if (active.stopRequested && result.reason === "aborted") continue;
+        return {
+          ok: false,
+          code: 1,
+          stdout: "",
+          stderr: `Durable submission was not answered: ${result.reason || "unknown"}`,
+          streamedTextCount,
+        };
+      }
+      for (const answer of result.answers || []) {
+        if (deliveredEntries.has(answer.entryId)) continue;
+        deliveredEntries.add(answer.entryId);
+        if (!answer.text) continue;
+        try {
+          // The live watch may already have sent this entry; delivery is keyed
+          // by text so a snapshot replay or a late settle cannot duplicate it.
+          await textDelivery.deliver(answer.text);
+          streamedTextCount += 1;
+        } catch (error) {
+          undeliveredTexts.push(answer.text);
+          console.error(`Durable assistant text delivery failed: ${error instanceof Error ? error.stack || error.message : error}`);
+        }
       }
     }
-  }
 
+    return {
+      ok: true,
+      code: 0,
+      stdout: "",
+      stderr: "",
+      streamedTextCount,
+      undeliveredText: undeliveredTexts.join("\n\n"),
+    };
+  } finally {
+    unsubscribe?.();
+  }
+}
+
+// One assistant entry can hold several text blocks; Telegram shows them as one
+// message, exactly as the Pi path folds one assistant message into one send.
+export function assistantTextFromEntry(entry) {
+  const messages = Array.isArray(entry?.model) ? entry.model : [];
+  return messages
+    .filter((message) => message?.role === "assistant")
+    .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+    .filter((block) => block?.type === "text")
+    .map((block) => String(block.text || ""))
+    .join("")
+    .trim();
+}
+
+// Live watch batches and the settled submission can name the same assistant
+// entry, and a watch overflow can replay one. Deduplicate by exact text so the
+// user sees each answer once while a Telegram failure keeps it retryable.
+function createAssistantTextDelivery(telegram, active, envelope) {
+  const delivered = new Set();
+  const pending = new Map();
+  const send = (replyEnvelope, text) => telegram.queueAssistantTextDisplay(active, replyEnvelope, text).then(
+    () => {
+      delivered.add(text);
+      pending.delete(text);
+      return true;
+    },
+    (error) => {
+      pending.delete(text);
+      throw error;
+    },
+  );
   return {
-    ok: true,
-    code: 0,
-    stdout: "",
-    stderr: "",
-    streamedTextCount,
-    undeliveredText: undeliveredTexts.join("\n\n"),
+    deliver(text, replyEnvelope = envelope) {
+      if (delivered.has(text)) return Promise.resolve(false);
+      const inFlight = pending.get(text);
+      if (inFlight) return inFlight;
+      const attempt = send(replyEnvelope, text);
+      pending.set(text, attempt);
+      return attempt;
+    },
   };
 }
 

@@ -98,6 +98,88 @@ test("Durable watch events adapt to Telepi's existing activity mechanics", () =>
   assert.deepEqual(durableEventToPiEvents({ type: "run_end" }), [{ type: "agent_end" }]);
 });
 
+test("Durable runs stream each committed assistant entry before the turn settles", async () => {
+  const listeners = new Set();
+  let emit;
+  const deliveredBeforeSettle = [];
+  const sent = [];
+  const driver = {
+    infrastructureAgentDir: "/tmp/infrastructure-agent",
+    onEvent(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    async ensureEndpoint() {},
+    async submit() {
+      emit = (events, endpointKey = "telegram:10:20") => {
+        for (const listener of listeners) listener("conversation.events", { endpointKey, events });
+      };
+      return { submissionId: 7 };
+    },
+    async waitSubmission() {
+      emit([
+        { type: "message_start", message: { role: "assistant", content: [] } },
+        {
+          type: "message_end",
+          entry: {
+            id: 5,
+            model: [{
+              role: "assistant",
+              content: [
+                { type: "text", text: "Checking the logs first." },
+                { type: "toolCall", name: "bash" },
+              ],
+            }],
+          },
+        },
+        // A watch overflow replays the same commit; it must not resend the text.
+        {
+          type: "message_end",
+          entry: { id: 5, model: [{ role: "assistant", content: [{ type: "text", text: "Checking the logs first." }] }] },
+        },
+      ]);
+      // Another conversation's watch batch must be ignored.
+      emit([
+        { type: "message_end", entry: { id: 6, model: [{ role: "assistant", content: [{ type: "text", text: "Other topic" }] }] } },
+      ], "telegram:10:21");
+      // Give the queued live delivery a turn to run before the submission settles.
+      await new Promise((resolveTick) => setImmediate(resolveTick));
+      deliveredBeforeSettle.push(...sent);
+      return {
+        status: "done",
+        answers: [
+          { entryId: 5, text: "Checking the logs first." },
+          { entryId: 9, text: "All services are healthy." },
+        ],
+      };
+    },
+    async abort() {},
+  };
+  const telegram = {
+    async queueAssistantTextDisplay(_active, envelope, text) {
+      assert.equal(envelope.chatId, "10");
+      sent.push(text);
+    },
+  };
+  const active = { steered: [], resolveReady() {}, envelope: { chatId: "10", topicId: "20", messageId: "30" } };
+
+  const result = await runDurableTopic(
+    driver,
+    config,
+    telegram,
+    { ...config.topics[0], backend: "durable" },
+    { chatId: "10", topicId: "20", userId: "owner", userName: "Owner", messageId: "30", text: "Hello" },
+    active,
+  );
+
+  // Live narration was already in Telegram before the submission settled.
+  assert.deepEqual(deliveredBeforeSettle, ["Checking the logs first."]);
+  assert.deepEqual(sent, ["Checking the logs first.", "All services are healthy."]);
+  assert.equal(result.streamedTextCount, 2);
+  assert.equal(result.undeliveredText, "");
+  assert.equal(listeners.size, 0);
+});
+
 test("Durable runs retain assistant text rejected by Telegram for final delivery", async () => {
   const driver = {
     infrastructureAgentDir: "/tmp/infrastructure-agent",

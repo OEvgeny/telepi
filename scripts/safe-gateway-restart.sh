@@ -140,7 +140,6 @@ if [[ -z "$PI_BIN" ]]; then
     "$(command -v pi || true)" \
     "$HOME/.nix-profile/bin/pi" \
     "$HOME/.local/bin/pi" \
-    "$HOME/.npm/bin/pi" \
     "$HOME/.local/share/pnpm/pi"; do
     if [[ -n "$candidate" && -x "$candidate" ]]; then
       PI_BIN="$candidate"
