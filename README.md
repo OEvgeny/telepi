@@ -256,3 +256,11 @@ systemctl --user enable --now telepi-gateway
 ```
 
 Only one long-polling process can use a Telegram bot token at a time; stop any other consumer of the same token first.
+
+The unit appends both stdout and stderr to `.telepi/gateway.log`, so that file — not the journal — holds gateway output and crash traces; the journal only shows systemd's own `Main process exited` line. `TimeoutStopSec=20` bounds the teardown that follows a crash, because orphaned children can ignore SIGTERM and the default 90 s wait turns a one-second restart into a minute and a half of downtime.
+
+### Crash records
+
+A gateway must not die without saying why. `src/crash-diagnostics.js` keeps `unhandledRejection` and `uncaughtException` from killing the router: both are logged and written to `.telepi/cache/crashes/<timestamp>-<kind>.json` together with the process footprint and the in-flight registry (`gateway-inflight-debug.json` shape), and the gateway keeps serving. A non-zero exit also writes an `exit` record, so a silent exit leaves evidence even when nothing else was logged.
+
+Assistant text, reasoning, tool cards, and the activity card all share one display queue. Each queued step catches its own failure and logs it, so a Telegram timeout on an edit stays a logged display error instead of becoming a fatal unhandled rejection; the assistant-text path still returns a rejecting promise so the owning run can record the text and retry it.

@@ -148,10 +148,15 @@ class TelegramAdapter {
 
   queueAssistantTextDisplay(active, envelope, text) {
     this.noteTurnStatusVisibleActivity(active);
-    active.displayQueue = active.displayQueue
-      .catch(() => undefined)
-      .then(() => sendStreamingText(this, active, envelope, text));
-    return active.displayQueue;
+    // Keep the queue tail resolved: a rejected tail is an unhandled rejection
+    // the moment it settles, and Node turns that into a fatal process exit.
+    // Callers still receive the rejecting promise so a failed send can be
+    // recorded and retried by the run that owns this text.
+    const run = active.displayQueue.then(() => sendStreamingText(this, active, envelope, text));
+    active.displayQueue = run.catch((error) => {
+      console.error(`assistant text display failed chat=${envelope.chatId} topic=${envelope.topicId}: ${error.message}`);
+    });
+    return run;
   }
 
   queueDisplayPiEvent(active, envelope, event, displayMessages, options = {}) {
@@ -161,17 +166,21 @@ class TelegramAdapter {
     if (items.length) this.noteTurnStatusVisibleActivity(active);
     for (const item of items) {
       active.displayQueue = active.displayQueue
-        .catch(() => undefined)
-        .then(() => displayPiItem(this, active, envelope, item));
+        .then(() => displayPiItem(this, active, envelope, item))
+        .catch((error) => {
+          console.error(`display item failed chat=${envelope.chatId} topic=${envelope.topicId} type=${item.type}: ${error.message}`);
+        });
     }
   }
 
   resetReasoningDisplayFromPiEvent(active, event) {
     if (event?.type !== "message_start" || event.message?.role !== "user") return;
     active.displayQueue = active.displayQueue
-      .catch(() => undefined)
       .then(() => {
         active.reasoningDisplayMessage = undefined;
+      })
+      .catch((error) => {
+        console.error(`reasoning display reset failed: ${error.message}`);
       });
   }
 
@@ -777,7 +786,6 @@ function armTurnStatus(adapter, active, status, delayMs) {
 
 function queueTurnStatusRender(adapter, active, status, generation) {
   active.displayQueue = active.displayQueue
-    .catch(() => undefined)
     .then(async () => {
       if (
         status.stopped
@@ -827,6 +835,9 @@ function queueTurnStatusRender(adapter, active, status, generation) {
         topicId: status.envelope.topicId,
         text,
       }, [sent]);
+    })
+    .catch((error) => {
+      console.error(`turn status render failed chat=${status.envelope.chatId} topic=${status.envelope.topicId}: ${error.message}`);
     });
 }
 
@@ -855,13 +866,13 @@ function queueTurnStatusRemoval(adapter, active) {
   if (!existing) return;
   active.turnStatusMessage = undefined;
   active.displayQueue = active.displayQueue
-    .catch(() => undefined)
     .then(() => adapter.client.deleteMessage({
       chatId: existing.chatId,
       messageId: existing.messageId,
     }))
     .catch((error) => {
-      if (!/message to delete not found|message_id_invalid/i.test(error.message)) throw error;
+      if (/message to delete not found|message_id_invalid/i.test(error.message)) return;
+      console.error(`turn status removal failed chat=${existing.chatId} message=${existing.messageId}: ${error.message}`);
     });
 }
 

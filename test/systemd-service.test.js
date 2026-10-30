@@ -10,3 +10,13 @@ test("gateway service has a boot-stable Node and pi environment", () => {
   assert.match(unit, /^ExecStart=%h\/\.nix-profile\/bin\/node src\/gateway\.js$/m);
   assert.doesNotMatch(unit, /^ExecStart=.*\/usr\/bin\/env\s+(?:node|npm)/m);
 });
+
+test("gateway service captures stderr and bounds the post-crash teardown", () => {
+  // stderr carries every crash trace; the journal only shows systemd's exit line.
+  assert.match(unit, /^StandardError=append:%h\/telepi\/\.telepi\/gateway\.log$/m);
+  assert.match(unit, /^Restart=always$/m);
+  // Default TimeoutStopSec=90 turned a 1s crash into a 90s outage.
+  const timeout = unit.match(/^TimeoutStopSec=(\d+)$/m);
+  assert.ok(timeout, "TimeoutStopSec must be explicit");
+  assert.ok(Number(timeout[1]) > 0 && Number(timeout[1]) <= 30, `unexpected TimeoutStopSec=${timeout[1]}`);
+});

@@ -14,6 +14,9 @@ EnvironmentFile=-%h/telepi/.env
 ExecStart=%h/.nix-profile/bin/node src/gateway.js
 Restart=always
 RestartSec=5
+# A crashed main process must not hold the restart for systemd's default 90s
+# while orphaned children ignore SIGTERM; bound the teardown instead.
+TimeoutStopSec=20
 StandardOutput=append:%h/telepi/.telepi/gateway.log
 StandardError=append:%h/telepi/.telepi/gateway.log
 

@@ -4,6 +4,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { createReloadingConfigReader, findTopicByName, resolveTopicSession, setTopicSessionId } from "./config.js";
+import { installCrashDiagnostics } from "./crash-diagnostics.js";
 import { createTelegramAdapter } from "./telegram/adapter.js";
 import { lookupTelegramMessage } from "./telegram/message-lookup.js";
 import { parseCompactCommand } from "./pi/compact.js";
@@ -60,6 +61,12 @@ async function main() {
     onError: (error) => console.error(`config reload failed: ${error.message}`),
   });
   const config = getConfig();
+  // Installed before any network or spawn work so the first abnormal exit is
+  // already recorded. In-flight state is read lazily at crash time.
+  installCrashDiagnostics({
+    cacheDir: config.project.cache_dir,
+    snapshot: () => (queuePersistence ? serializePendingQueue(queuePersistence.inFlight) : null),
+  });
   const telegram = await createTelegramAdapter(config);
   const inFlight = new Map();
   const socketPath = resolveBrokerSocketPath(config);
