@@ -91,6 +91,48 @@ test("SDK worker arguments and route expectations reject concurrent config chang
   assert.throws(() => parseWorkerArgs(["--mode", "print"]), /Missing worker option|Unsupported worker mode/);
 });
 
+test("a recorded session switch lets a stale worker route continue", () => {
+  const args = parseWorkerArgs([
+    "--mode", "rpc",
+    "--config", config._path,
+    "--chat-id", "1",
+    "--topic-id", "10",
+    "--expected-topic-name", "Test Agent",
+    "--expected-agent", "testagent",
+    "--expected-session-id", "testagent-session",
+  ]);
+  const switched = {
+    ...config,
+    topics: [{ ...config.topics[0], session_id: "testagent-checkpoint" }],
+    sessions: {
+      unlinked: [{
+        topic_name: "Test Agent",
+        chat_id: "1",
+        topic_id: "10",
+        agent: "testagent",
+        session_id: "testagent-session",
+        replaced_by_session_id: "testagent-checkpoint",
+        unlinked_at: "2026-11-11T17:30:51.311Z",
+        reason: "compaction checkpoint",
+      }],
+    },
+  };
+  assert.equal(resolveWorkerTopic(switched, args), switched.topics[0]);
+
+  // A switch recorded for another agent, or an unrelated route change, still fails.
+  const otherAgent = {
+    ...switched,
+    sessions: { unlinked: switched.sessions.unlinked.map((entry) => ({ ...entry, agent: "someoneelse" })) },
+  };
+  assert.throws(() => resolveWorkerTopic(otherAgent, args), /session changed before startup/);
+  const unrelated = {
+    ...config,
+    topics: [{ ...config.topics[0], session_id: "hand-edited" }],
+    sessions: switched.sessions,
+  };
+  assert.throws(() => resolveWorkerTopic(unrelated, args), /session changed before startup/);
+});
+
 test("topic runtime spec preserves current entity cwd and separates infrastructure paths", () => {
   const spec = buildTopicRuntimeSpec(config, config.topics[0], {
     infrastructureAgentDir: "/tmp/pi-host-agent",

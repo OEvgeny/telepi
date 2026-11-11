@@ -61,9 +61,29 @@ export function resolveWorkerTopic(config, args) {
   const agent = getAgent(config, topic.agent);
   const sessionId = resolveTopicSession(config, topic, { agent }).id;
   if (sessionId !== String(args.expectedSessionId)) {
-    throw new Error(`Worker session changed before startup: ${sessionId} != ${args.expectedSessionId}`);
+    // A message can be routed against a config snapshot read just before a
+    // `/compact` checkpoint rewrote the topic's session. When the mismatch is a
+    // recorded switch from the expected session, the worker's view is simply
+    // newer and authoritative; anything else is a real route race.
+    if (!isRecordedSessionSwitch(config, topic, args.expectedSessionId, sessionId)) {
+      throw new Error(`Worker session changed before startup: ${sessionId} != ${args.expectedSessionId}`);
+    }
+    console.error(
+      `worker route was stale after a recorded session switch; continuing with ${sessionId} `
+      + `(expected ${args.expectedSessionId}) topic=${topic.name}`,
+    );
   }
   return topic;
+}
+
+function isRecordedSessionSwitch(config, topic, expectedSessionId, sessionId) {
+  const unlinked = config.sessions?.unlinked;
+  if (!Array.isArray(unlinked)) return false;
+  return unlinked.some((entry) => (
+    String(entry?.session_id ?? "") === String(expectedSessionId)
+    && String(entry?.replaced_by_session_id ?? "") === String(sessionId)
+    && (entry?.agent == null || String(entry.agent) === String(topic.agent))
+  ));
 }
 
 export async function runWorker(argv = process.argv.slice(2)) {

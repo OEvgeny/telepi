@@ -53,13 +53,13 @@ class TelegramAdapter {
     let pollFailures = 0;
 
     while (true) {
-      const config = getConfig();
+      const pollConfig = getConfig();
       let updates;
       try {
         updates = await this.client.getUpdates({
           offset,
-          timeoutSeconds: config.telegram.poll_timeout_seconds,
-          limit: config.telegram.poll_limit,
+          timeoutSeconds: pollConfig.telegram.poll_timeout_seconds,
+          limit: pollConfig.telegram.poll_limit,
         });
         pollFailures = 0;
       } catch (error) {
@@ -70,6 +70,12 @@ class TelegramAdapter {
         continue;
       }
 
+      // The long poll blocks for up to `poll_timeout_seconds`, and `/compact`
+      // or CLI maintenance can rewrite a topic's route while it is in flight.
+      // Resolve the updates against the config read *after* they arrive, or a
+      // message sent right after a compaction is routed to the old session and
+      // the worker's route guard rejects it.
+      const config = getConfig();
       for (const update of updates) {
         offset = update.update_id + 1;
         if (update.callback_query) {
