@@ -6,6 +6,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import {
   buildCompactionInstructions,
+  COMPACTION_NOTICE,
   createCompactionCheckpoint,
   hasMeaningfulEntriesAfterLatestCompaction,
 } from "../src/pi/compact.js";
@@ -41,6 +42,18 @@ test("a compaction freshness notice does not make the session compactable again"
   assert.equal(hasMeaningfulEntriesAfterLatestCompaction([compaction, notice, model]), false);
   assert.equal(hasMeaningfulEntriesAfterLatestCompaction([compaction, notice, { type: "message", id: "next" }]), true);
   assert.equal(hasMeaningfulEntriesAfterLatestCompaction([{ type: "message", id: "first" }]), true);
+});
+
+// A compacted session keeps roughly keepRecentTokens of raw history, so an
+// earlier question and its answer can sit directly above the next prompt. One
+// local model re-answered that earlier exchange instead of the new request; the
+// notice must name the next message as the work and forbid a re-answer.
+test("the compaction notice points the agent at the next message", () => {
+  assert.match(COMPACTION_NOTICE, /The next user message is new work\./);
+  assert.match(COMPACTION_NOTICE, /Answer that message\./);
+  assert.match(COMPACTION_NOTICE, /Do not re-send or re-answer a previous exchange/);
+  assert.match(COMPACTION_NOTICE, /re-read the relevant file/);
+  assert.doesNotMatch(COMPACTION_NOTICE, /answers you gave before compaction/);
 });
 
 test("compaction checkpoint keeps the exact model context without summarized history", () => {

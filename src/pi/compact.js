@@ -37,12 +37,13 @@ const FRESHNESS_INSTRUCTIONS =
   "their purpose, without copying their contents. Preserve conversational facts " +
   "such as user decisions, material work performed, and results.";
 
-const COMPACTION_NOTICE =
-  "This session was just compacted. Any skill files, AGENTS.md, or other files read " +
-  "earlier may have changed on disk since — the summary above intentionally omits " +
-  "their contents. Do not answer from remembered file contents or from answers you " +
-  "gave before compaction: re-read the relevant skill/file before relying on facts " +
-  "that came from one.";
+export const COMPACTION_NOTICE =
+  "This session was just compacted. The summary above intentionally omits the " +
+  "contents of skill files, AGENTS.md, and other documents, and those files may " +
+  "have changed on disk since — re-read the relevant file before relying on a fact " +
+  "that came from one.\n\n" +
+  "The next user message is new work. Answer that message. Do not re-send or " +
+  "re-answer a previous exchange that was already concluded before the compaction.";
 
 export async function compactPiSession(config, topic, instructions, options = {}) {
   const pi = await loadPiModule();
