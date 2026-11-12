@@ -37,6 +37,7 @@ import { resolveRemoteAgentResources } from "./remote-agent.js";
 import { RemoteBrowserManager, createRemoteBrowserExtension } from "./remote-browser.js";
 import { createDurableTelegramExtension } from "./telegram-tools.js";
 import { createDurableBackgroundJobExtension } from "./background-job-tool.js";
+import { createDurableImageExtension } from "./image-tool.js";
 import {
   sshConnectionKey,
   sshEnvironmentId,
@@ -111,13 +112,15 @@ export async function openDurableHost(options) {
     ConversationDoc,
   );
   const backgroundJobs = createDurableBackgroundJobExtension();
-  const runtimeExtensions = { prompt, remoteBrowser, telegram, backgroundJobs };
+  const images = createDurableImageExtension();
+  const runtimeExtensions = { prompt, remoteBrowser, telegram, backgroundJobs, images };
   const registry = createRegistry();
   registry.install(CodingTools);
   registry.install(prompt);
   registry.install(remoteBrowser);
   registry.install(telegram);
   registry.install(backgroundJobs);
+  registry.install(images);
   const envs = new ExecutionEnvs(options.projectRoot || process.cwd(), {
     knownHostsFile: join(storageDir, "ssh-known-hosts"),
     onLog: options.onSshLog,
@@ -129,7 +132,7 @@ export async function openDurableHost(options) {
     {
       models: harnessModels,
       registry,
-      settings: createHarnessSettings(settingsManager, [CodingTools, prompt, telegram, backgroundJobs]),
+      settings: createHarnessSettings(settingsManager, [CodingTools, prompt, telegram, backgroundJobs, images]),
       env: envs.env,
       conversationCreated: async (tx, conversation) => {
         await tx.doc(ConversationDoc, conversation.id);
@@ -334,6 +337,7 @@ function buildAgentChange(models, spec, runtimeExtensions) {
       runtimeExtensions.prompt,
       runtimeExtensions.telegram,
       runtimeExtensions.backgroundJobs,
+      runtimeExtensions.images,
       ...(spec.browserPackageRoot ? [runtimeExtensions.remoteBrowser] : []),
     ],
     cwd: endpointCwd(spec),
