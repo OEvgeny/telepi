@@ -43,7 +43,16 @@ export class TelegramClient {
       offset,
       timeout: timeoutSeconds,
       limit,
-      allowed_updates: ["message", "edited_message", "callback_query", "message_reaction"],
+      allowed_updates: [
+        "message",
+        "edited_message",
+        "callback_query",
+        "message_reaction",
+        // Taps on HTML widgets (Bot API 10.4). Without these two the bot never
+        // sees a tap and the widget times out after 15 seconds.
+        "widget_query",
+        "shared_widget_query",
+      ],
     }, { timeoutMs: (Number(timeoutSeconds) + 10) * 1000 });
   }
 

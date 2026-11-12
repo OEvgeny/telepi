@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { createReloadingConfigReader, findTopicByName, resolveTopicSession, setTopicSessionId } from "./config.js";
 import { installCrashDiagnostics } from "./crash-diagnostics.js";
 import { createTelegramAdapter } from "./telegram/adapter.js";
+import { createWidgetStateStore, handleWidgetQuery } from "./telegram/widget-state.js";
 import { lookupTelegramMessage } from "./telegram/message-lookup.js";
 import { parseCompactCommand } from "./pi/compact.js";
 import { advanceModelError } from "./pi/model-error.js";
@@ -95,6 +96,8 @@ async function main() {
   }
   startConfiguredPromptInbox(getConfig, telegram, inFlight);
 
+  const widgetStates = createWidgetStateStore(resolve(config.project.cache_dir, "widget-states.json"));
+
   await telegram.poll({
     getConfig,
     onMessage: (configForMessage, topic, envelope) => handleTelegramMessage(
@@ -118,6 +121,11 @@ async function main() {
       topic,
       envelope,
     ),
+    onWidgetQuery: (configForQuery, query, kind) => handleWidgetQuery(query, {
+      kind,
+      store: widgetStates,
+      api: (method, payload) => telegram.api(method, payload),
+    }),
   });
 }
 

@@ -48,7 +48,7 @@ class TelegramAdapter {
     this.typingByTopic = new Map();
   }
 
-  async poll({ getConfig, onMessage, onButtonMessage, onReactionMessage }) {
+  async poll({ getConfig, onMessage, onButtonMessage, onReactionMessage, onWidgetQuery }) {
     let offset = Number(process.env.TELEPI_UPDATE_OFFSET || 0) || undefined;
     let pollFailures = 0;
 
@@ -88,6 +88,24 @@ class TelegramAdapter {
           this.handleMessageReaction(config, update.message_reaction, onReactionMessage).catch((error) => {
             console.error(`reaction handling failed: ${error.stack || error.message}`);
           });
+          continue;
+        }
+        // A widget tap. It carries no chat text and must be answered within 15
+        // seconds, so it never waits behind a running turn.
+        const widgetQuery = update.widget_query ? ["widget_query", update.widget_query]
+          : update.shared_widget_query ? ["shared_widget_query", update.shared_widget_query]
+            : null;
+        if (widgetQuery) {
+          const query = widgetQuery[1];
+          if (!isAllowedUser(config, query.from?.id == null ? null : String(query.from.id))) {
+            console.error(`ignored unauthorized widget query user ${query.from?.id}`);
+            continue;
+          }
+          Promise.resolve()
+            .then(() => onWidgetQuery(config, query, widgetQuery[0]))
+            .catch((error) => {
+              console.error(`widget query handling failed: ${error.stack || error.message}`);
+            });
           continue;
         }
 
@@ -254,6 +272,12 @@ class TelegramAdapter {
 
   findSentMessageRecord(chatId, messageId) {
     return this.messageIndex?.find(chatId, messageId) || null;
+  }
+
+  // Raw Bot API access for features the adapter does not model itself, such as
+  // answering a widget query.
+  api(method, payload) {
+    return this.client.request(method, payload);
   }
 
   findTelegramMessageRecord(chatId, messageId) {
