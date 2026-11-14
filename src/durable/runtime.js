@@ -27,6 +27,8 @@ import { RemoteExecutionEnv, sshConnection } from "@earendil-works/pi-env";
 import { createDurableCompactionModels } from "../compaction-policy.js";
 import { createViewEventTranslator } from "./view-events.js";
 import { stageAttachments } from "./attachments.js";
+import { PiToolBridge, bridgeExtensionName } from "./pi-tool-bridge.js";
+import { readFile } from "node:fs/promises";
 import { applyHttpProxySettings, configurePiHttpDispatcher } from "../pi/http-dispatcher.js";
 import {
   loadLocalAgentContext,
@@ -84,6 +86,7 @@ export const ConversationDoc = defineDoc({
     legacySessionId: null,
     skillPaths: [],
     systemPrompt: null,
+    noContextFiles: false,
   }),
 });
 
@@ -120,6 +123,13 @@ export async function openDurableHost(options) {
   // converts (BMP), and shrinks them to the model's limits before sending.
   const codingTools = createCodingTools({ images: options.images || await createNodePhotonImages() });
   const runtimeExtensions = { codingTools, prompt, remoteBrowser, telegram, backgroundJobs };
+  // Pi extension tools (web search, transcription, agent tools), loaded as Pi
+  // would load them for the topic. Tests can turn the bridge off.
+  const piTools = options.piTools === false ? null : new PiToolBridge({
+    loadPi: options.loadPi || (() => import("@earendil-works/pi-coding-agent")),
+    modelRuntime: options.models ? undefined : modelRuntime,
+    onCustomMessage: options.onCustomMessage,
+  });
   const registry = createRegistry();
   registry.install(codingTools);
   registry.install(prompt);
@@ -166,7 +176,8 @@ export async function openDurableHost(options) {
     ensureEndpoint(spec) {
       return withKeyLock(endpointLocks, spec.endpointKey, async () => {
         const prepared = await prepareEndpointSpec(spec, envs);
-        return ensureEndpoint(harness, modelRuntime, prepared, runtimeExtensions);
+        const piToolsExtension = await installPiTools(piTools, registry, prepared, runtimeExtensions);
+        return ensureEndpoint(harness, modelRuntime, prepared, { ...runtimeExtensions, piTools: piToolsExtension });
       });
     },
 
@@ -207,9 +218,16 @@ export async function openDurableHost(options) {
 
     async submit(endpointKey, draft) {
       const conversation = await resolveEndpointConversation(harness, endpointKey);
+      let content = String(draft.content || "");
+      // `/skill:<name> args` expands to the skill's text, as Pi expands it.
+      if (content.startsWith("/skill:")) {
+        const metadata = await harness.snapshot(ConversationDoc, conversation.id, context);
+        const env = await envs.env({ conversationId: conversation.id, cwd: metadata?.cwd, read: harness }, context);
+        content = await expandSkillCommand(content, await loadConversationSkills(metadata, env, context), env, context);
+      }
       const submission = await conversation.submit({
         type: "input",
-        content: String(draft.content || ""),
+        content,
         requestId: requireString(draft.requestId, "submission requestId"),
         whenBusy: draft.whenBusy || "followUp",
       }, context);
@@ -307,6 +325,7 @@ export async function openDurableHost(options) {
       } finally {
         try {
           await browserManager.cleanup(context);
+          await piTools?.close();
         } finally {
           await envs.cleanup(context);
         }
@@ -382,6 +401,7 @@ function buildAgentChange(models, spec, runtimeExtensions) {
       runtimeExtensions.telegram,
       runtimeExtensions.backgroundJobs,
       ...(spec.browserPackageRoot ? [runtimeExtensions.remoteBrowser] : []),
+      ...(runtimeExtensions.piTools ? [runtimeExtensions.piTools] : []),
     ],
     cwd: endpointCwd(spec),
   };
@@ -397,6 +417,8 @@ function createTelepiPrompt() {
       section("project_context", async (input, renderContext) => {
         const metadata = await input.read.snapshot(ConversationDoc, input.conversationId, renderContext);
         if (!metadata?.agentDir || !metadata.cwd) return undefined;
+        // `context_files: false`: only the identity and system prompt, as Pi.
+        if (metadata.noContextFiles) return metadata.systemPrompt || undefined;
         const files = metadata.location?.type === "ssh"
           ? [
               ...(metadata.location.agent_dir
@@ -411,31 +433,8 @@ function createTelepiPrompt() {
       }),
       section("skills", async (input, renderContext) => {
         const metadata = await input.read.snapshot(ConversationDoc, input.conversationId, renderContext);
-        if (!metadata?.agentDir || !metadata.cwd) return undefined;
-        const isRemote = metadata.location?.type === "ssh";
-        const usesRemoteAgentDir = isRemote && Boolean(metadata.location.agent_dir);
-        const loaded = usesRemoteAgentDir
-          ? { skills: [], diagnostics: [] }
-          : loadSkills({
-              cwd: isRemote ? metadata.agentDir : metadata.cwd,
-              agentDir: metadata.agentDir,
-              skillPaths: metadata.skillPaths || [],
-              includeDefaults: true,
-            });
-        if (isRemote) {
-          const [agentSkills, projectSkills] = await Promise.all([
-            loadSkillRootsFromEnv(input.env, metadata.remoteSkillRoots || [], renderContext),
-            loadProjectSkillsFromEnv(input.env, input.env.cwd, renderContext),
-          ]);
-          const names = new Set(loaded.skills.map((skill) => skill.name));
-          for (const skill of [...agentSkills.skills, ...projectSkills.skills]) {
-            if (!names.has(skill.name)) {
-              loaded.skills.push(skill);
-              names.add(skill.name);
-            }
-          }
-        }
-        return loaded.skills.length ? formatSkillsForPrompt(loaded.skills) : undefined;
+        const skills = await loadConversationSkills(metadata, input.env, renderContext);
+        return skills.length ? formatSkillsForPrompt(skills) : undefined;
       }),
       section("cwd", (input) => input.env?.cwd || input.agent.cwd),
     ],
@@ -584,6 +583,7 @@ function assignConversationMetadata(metadata, spec) {
   metadata.legacySessionId = spec.legacySessionId || null;
   metadata.skillPaths = [...new Set((spec.skillPaths || []).map((path) => resolve(path)))];
   metadata.systemPrompt = spec.systemPrompt || null;
+  metadata.noContextFiles = spec.noContextFiles === true;
 }
 
 function assertBindingMatches(spec, metadata) {
@@ -673,4 +673,89 @@ function withKeyLock(locks, key, operation) {
   return current.finally(() => {
     if (locks.get(key) === current) locks.delete(key);
   });
+}
+
+// The skills a conversation's prompt lists: local ones from its agent and
+// project, and for an SSH location those found through its environment.
+async function loadConversationSkills(metadata, env, renderContext) {
+  if (!metadata?.agentDir || !metadata.cwd) return [];
+  const isRemote = metadata.location?.type === "ssh";
+  const usesRemoteAgentDir = isRemote && Boolean(metadata.location.agent_dir);
+  const loaded = usesRemoteAgentDir
+    ? { skills: [], diagnostics: [] }
+    : loadSkills({
+        cwd: isRemote ? metadata.agentDir : metadata.cwd,
+        agentDir: metadata.agentDir,
+        skillPaths: metadata.skillPaths || [],
+        includeDefaults: true,
+      });
+  if (isRemote && env) {
+    const [agentSkills, projectSkills] = await Promise.all([
+      loadSkillRootsFromEnv(env, metadata.remoteSkillRoots || [], renderContext),
+      loadProjectSkillsFromEnv(env, env.cwd, renderContext),
+    ]);
+    const names = new Set(loaded.skills.map((skill) => skill.name));
+    for (const skill of [...agentSkills.skills, ...projectSkills.skills]) {
+      if (!names.has(skill.name)) {
+        loaded.skills.push(skill);
+        names.add(skill.name);
+      }
+    }
+  }
+  return loaded.skills;
+}
+
+// Pi's `/skill:<name> args`: the skill's body in a <skill> block, then the
+// arguments. An unknown skill passes through unchanged, as in Pi. The skill
+// file is read where it lives: locally, or through an SSH environment.
+export async function expandSkillCommand(text, skills, env, renderContext) {
+  const match = /^\/skill:(\S+)(?:\s+([\s\S]*))?$/.exec(text);
+  if (!match) return text;
+  const skill = skills.find((candidate) => candidate.name === match[1]);
+  if (!skill) return text;
+  let content;
+  const remote = env && typeof env.readTextFile === "function" && skill.sourceInfo?.source === "telepi-remote";
+  if (remote) {
+    const read = await env.readTextFile(skill.filePath, renderContext);
+    if (!read.ok) return text;
+    content = read.value;
+  } else {
+    try {
+      content = await readFile(skill.filePath, "utf8");
+    } catch {
+      if (!env || typeof env.readTextFile !== "function") return text;
+      const read = await env.readTextFile(skill.filePath, renderContext);
+      if (!read.ok) return text;
+      content = read.value;
+    }
+  }
+  const body = content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim();
+  const block = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
+  const args = (match[2] || "").trim();
+  return args ? `${block}\n\n${args}` : block;
+}
+
+// Install, replace, or remove the endpoint's bridged Pi tools. A failure only
+// costs those tools: the topic keeps working with its native ones.
+async function installPiTools(piTools, registry, spec, runtimeExtensions) {
+  if (!piTools || !spec.piExtensions) return null;
+  const name = bridgeExtensionName(spec.endpointKey);
+  try {
+    const reserved = [
+      runtimeExtensions.codingTools,
+      runtimeExtensions.telegram,
+      runtimeExtensions.backgroundJobs,
+      ...(spec.browserPackageRoot ? [runtimeExtensions.remoteBrowser] : []),
+    ].flatMap((extension) => (extension?.tools || []).map((tool) => tool.name));
+    const extension = await piTools.extensionFor(spec.endpointKey, spec.piExtensions, {
+      location: spec.location?.type === "ssh" ? "ssh" : "local",
+      reserved,
+    });
+    if (extension) registry.install(extension);
+    else if (registry.uninstall) registry.uninstall({ name });
+    return extension;
+  } catch (error) {
+    console.error(`pi tool bridge unavailable endpoint=${spec.endpointKey}: ${error instanceof Error ? error.stack || error.message : error}`);
+    return null;
+  }
 }

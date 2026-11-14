@@ -7,7 +7,8 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { readConfig } from "../src/config.js";
-import { durableEventToPiEvents, durableUnavailableMessage, runDurableTopic, stageEnvelopeAttachments } from "../src/durable/gateway-run.js";
+import { describeUnanswered, durableEventToDisplayEvents, durableEventToPiEvents, durableUnavailableMessage, runDurableTopic, stageEnvelopeAttachments } from "../src/durable/gateway-run.js";
+import { isTelegramDeliveryEvent } from "../src/telegram/adapter.js";
 import {
   buildDurableEndpointSpec,
   buildDurableSubmission,
@@ -61,6 +62,14 @@ test("Durable topic specs preserve a fresh endpoint beside immutable legacy hist
     legacySessionId: "legacy-session",
     skillPaths: ["/tmp/telepi-durable-topic/skills/test/SKILL.md"],
     systemPrompt: "Agent instructions",
+    noContextFiles: false,
+    // The Pi extensions this topic would load on the Pi backend.
+    piExtensions: {
+      cwd: "/tmp/telepi-durable-topic/work/pilot",
+      agentDir: "/tmp/telepi-durable-topic/entities/agent",
+      infrastructureAgentDir: "/tmp/infrastructure-agent",
+      extensionPaths: [],
+    },
   });
   assert.equal(durableEndpointKey({ ...topic, durable_endpoint_generation: 2 }), "telegram:10:20:g2");
   assert.deepEqual(buildDurableSubmission(config, topic, {
@@ -383,4 +392,77 @@ test("Durable SSH submissions name attachments by their path on the remote machi
   const failedContent = buildDurableSubmission(config, config.topics[0], unavailable).content;
   assert.match(failedContent, /- image: unavailable \(not copied to box: ssh: connection refused\)/);
   assert.doesNotMatch(failedContent, /\/gateway\/cache/);
+});
+
+test("Durable events feed display_messages and delivery counting in Pi's shapes", async () => {
+  const answer = {
+    type: "message_end",
+    entry: { id: 4, model: [{ role: "assistant", content: [
+      { type: "thinking", thinking: "weighing it" },
+      { type: "text", text: "Sending the photo." },
+      { type: "toolCall", id: "c1", name: "telepi_send_image", arguments: { file_path: "a.png" } },
+    ] }] },
+  };
+  assert.deepEqual(durableEventToDisplayEvents(answer).map((event) => event.assistantMessageEvent.type), [
+    "thinking_end",
+    "text_end",
+    "toolcall_end",
+  ]);
+
+  const result = { role: "toolResult", toolCallId: "c1", toolName: "telepi_send_image", isError: false,
+    content: [{ type: "text", text: "Image sent" }], details: { messageId: "77", message_id: "77" } };
+  const end = { type: "tool_execution_end", toolCallId: "c1", toolName: "telepi_send_image", entry: { id: 5, model: [result] } };
+  const [piEnd] = durableEventToPiEvents(end);
+  assert.deepEqual(piEnd.result, { content: result.content, details: result.details });
+
+  // The gateway's own check counts it as delivered output, as on Pi topics.
+  assert.equal(isTelegramDeliveryEvent(piEnd), true);
+
+  // A display_messages config with tool cards sees the tool result.
+  assert.deepEqual(durableEventToDisplayEvents({ type: "message_end", entry: { id: 5, model: [result] } }), [
+    { type: "message_end", message: result },
+  ]);
+});
+
+test("Durable runs report a model error as Pi topics do and name other failures plainly", async () => {
+  const driver = {
+    infrastructureAgentDir: "/tmp/infrastructure-agent",
+    onEvent() { return () => undefined; },
+    async ensureEndpoint() {},
+    async submit() { return { submissionId: 7 }; },
+    async waitSubmission() { return { status: "unanswered", reason: "model_error", detail: "429 rate limited" }; },
+    async abort() {},
+  };
+  const active = { steered: [], resolveReady() {}, envelope: { chatId: "10", topicId: "20", messageId: "30" } };
+  const result = await runDurableTopic(driver, config, { async queueAssistantTextDisplay() {} },
+    { ...config.topics[0], backend: "durable" },
+    { chatId: "10", topicId: "20", userId: "owner", userName: "Owner", messageId: "30", text: "Hi" }, active);
+  assert.equal(result.ok, true);
+  assert.equal(result.modelError, "429 rate limited");
+
+  assert.equal(describeUnanswered("turn_limit", "40 turns"), "Durable run ended without an answer: the run reached its tool-round limit (40 turns).");
+  assert.equal(describeUnanswered("weird"), "Durable run ended without an answer: reason weird.");
+});
+
+test("Durable runs send no assistant text when display_messages turns it off", async () => {
+  const sent = [];
+  const driver = {
+    infrastructureAgentDir: "/tmp/infrastructure-agent",
+    onEvent() { return () => undefined; },
+    async ensureEndpoint() {},
+    async submit() { return { submissionId: 7 }; },
+    async waitSubmission() { return { status: "done", answers: [{ entryId: 3, text: "hidden" }] }; },
+    async abort() {},
+  };
+  const active = {
+    steered: [],
+    resolveReady() {},
+    envelope: { chatId: "10", topicId: "20", messageId: "30" },
+    display: { streamAssistantMessages: false },
+  };
+  const result = await runDurableTopic(driver, config, { async queueAssistantTextDisplay(_a, _e, text) { sent.push(text); } },
+    { ...config.topics[0], backend: "durable" },
+    { chatId: "10", topicId: "20", userId: "owner", userName: "Owner", messageId: "30", text: "Hi" }, active);
+  assert.deepEqual(sent, []);
+  assert.equal(result.streamedTextCount, 0);
 });

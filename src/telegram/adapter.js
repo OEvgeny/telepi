@@ -1057,7 +1057,7 @@ function isDisplayMessageAllowed(displayMessages, type) {
   return values.includes(type.split("/")[0]);
 }
 
-function isTelegramDeliveryEvent(event) {
+export function isTelegramDeliveryEvent(event) {
   if (event?.type !== "tool_execution_end") return false;
   const details = event.result?.details;
   if (!details || typeof details !== "object") return false;

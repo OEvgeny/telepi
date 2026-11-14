@@ -104,6 +104,16 @@ npm run telepi -- topic:ssh-host-key --name Helper --accept SHA256:<verified-fin
 
 Without `--agent-dir`, stable agent identity and agent-wide skills remain local while project `AGENTS.md`/`CLAUDE.md` and `.pi/skills` come from the remote workspace. With `--agent-dir`, identity, settings-declared packages, and skills are resolved through SSH from that remote deployment instead; no local agent path is rendered as remote project context. A packaged browser extension is adapted into a Durable `browser` tool whose process, Chromium, sessions, and evidence stay remote. Durable-native Telegram tools remain gateway-local, except image bytes are read from the selected execution environment before upload. Model credentials and the Durable database always remain local. `pi-env` is transport, not a sandbox: remote tools have the authority of the configured SSH account, so use a dedicated account or container when isolation is required. SSH locations are rejected by the ordinary Pi backend.
 
+### Pi extension tools in Durable topics
+
+Durable cannot load Pi extensions itself, so the Durable host loads them in a headless Pi session on the gateway host, one per endpoint, and offers their tools to the conversation. A local Durable topic gets the extensions its Pi topic would load: the shared ones in the Pi agent directory (`web_search`, `web_fetch`, `transcribe_file`, `transcribe_file_multilingual`), the project's, and the agent's `extensions`. An SSH Durable topic gets the gateway host's shared extensions and the configured extension paths. Pi's built-in tools and Telepi's own `telepi_*` tools are not bridged, because Durable has native versions.
+
+Bridged tools run on the gateway host. In an SSH topic, a file argument (a string parameter named like `path` or `file_path`) is copied from the remote machine to a local temporary file before the call, and removed after it. Cards an extension posts with `pi.sendMessage` are shown when the topic's `display_messages` lists their `custom/<type>`.
+
+Only tools and cards are bridged. Hooks on Pi's agent loop (`before_agent_start`, `input`, message and tool events) have no Durable run to observe: Freya's `studio-observer` and Embla's `embla-life` work only on the Pi backend. Extension commands are not bridged either.
+
+Durable topics also follow the rest of a topic's Pi settings: `display_messages` (reasoning, tool and custom cards, or no assistant text), `context_files: false`, and `/skill:<name>` expansion. A reply sent only by a tool (a photo, buttons) counts as output, and a run that ends on a model error reports it as a Pi topic does.
+
 Start a topic with a fresh pi session without deleting old transcript files:
 
 ```bash

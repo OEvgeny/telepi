@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -7,6 +8,7 @@ import {
   resolveTopicSession,
 } from "../config.js";
 import { formatTopicMessage, topicMessageDeliveryId } from "../pi/topic-spec.js";
+import { buildTopicRuntimeSpec } from "../pi/runtime.js";
 
 export const TOPIC_BACKEND_PI = "pi";
 export const TOPIC_BACKEND_DURABLE = "durable";
@@ -61,6 +63,14 @@ export function buildDurableEndpointSpec(config, topic, options = {}) {
   if (!modelSpec) throw new Error(`Durable topic ${topic.name} has no configured model`);
   const infrastructureAgentDir = options.infrastructureAgentDir || resolveInfrastructureAgentDir();
   const agentDir = session.location ? session.entityDir : infrastructureAgentDir;
+  // `context_files: false` works as on Pi topics: no project or agent context
+  // files, but the entity's own AGENTS.md stays as its identity.
+  const noContextFiles = agent.context_files === false;
+  const identityPath = join(session.entityDir, "AGENTS.md");
+  const systemPrompt = [
+    noContextFiles && existsSync(identityPath) ? readFileSync(identityPath, "utf8") : null,
+    agent.system_prompt ? String(agent.system_prompt) : null,
+  ].filter(Boolean).join("\n\n") || null;
   return {
     endpointKey: durableEndpointKey(topic),
     agentId: topic.agent,
@@ -73,7 +83,31 @@ export function buildDurableEndpointSpec(config, topic, options = {}) {
     modelSpec,
     legacySessionId: session.id,
     skillPaths: (agent.skills || []).map((path) => resolvePath(config.project.root, path)),
-    systemPrompt: agent.system_prompt ? String(agent.system_prompt) : null,
+    systemPrompt,
+    noContextFiles,
+    piExtensions: buildPiExtensionSpec(config, topic, session, infrastructureAgentDir),
+  };
+}
+
+// The Pi extensions this topic would load on the Pi backend, for the Durable
+// host to load on the gateway host and offer as tools. A topic at an SSH
+// location has no local project: it gets the gateway host's shared Pi agent
+// (global extensions and packages) and the configured extension paths.
+export function buildPiExtensionSpec(config, topic, session, infrastructureAgentDir) {
+  const pi = buildTopicRuntimeSpec(config, topic, { infrastructureAgentDir });
+  if (session.location?.type !== "ssh") {
+    return {
+      cwd: pi.cwd,
+      agentDir: pi.agentDir,
+      infrastructureAgentDir,
+      extensionPaths: pi.extensionPaths,
+    };
+  }
+  return {
+    cwd: existsSync(session.entityDir) ? session.entityDir : resolve(config.project.root),
+    agentDir: infrastructureAgentDir,
+    infrastructureAgentDir,
+    extensionPaths: pi.extensionPaths,
   };
 }
 

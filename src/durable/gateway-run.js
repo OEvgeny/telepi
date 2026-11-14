@@ -25,6 +25,8 @@ export async function runDurableTopic(driver, config, telegram, topic, envelope,
     if (recoveryIndex >= 0) active.steered.splice(recoveryIndex, 1);
   };
   active.acceptsSteering = true;
+  // `display_messages` can turn assistant text off, as it does for Pi topics.
+  const streamAssistantMessages = active.display?.streamAssistantMessages !== false;
   const textDelivery = createAssistantTextDelivery(telegram, active, active.envelope || envelope);
   // Durable streams each assistant entry as it commits. Deliver that text at
   // the commit, not when the submission settles, so narration before a tool
@@ -32,7 +34,7 @@ export async function runDurableTopic(driver, config, telegram, topic, envelope,
   const unsubscribe = typeof driver.onEvent === "function"
     ? driver.onEvent((event, data) => {
       if (event !== "conversation.events" || data?.endpointKey !== endpoint.endpointKey) return;
-      if (!Array.isArray(data.events)) return;
+      if (!Array.isArray(data.events) || !streamAssistantMessages) return;
       for (const durableEvent of data.events) {
         if (durableEvent?.type !== "message_end") continue;
         const text = assistantTextFromEntry(durableEvent.entry);
@@ -53,18 +55,31 @@ export async function runDurableTopic(driver, config, telegram, topic, envelope,
       const result = await driver.waitSubmission(endpoint.endpointKey, waiting.submissionId);
       if (result.status !== "done") {
         if (active.stopRequested && result.reason === "aborted") continue;
+        // A model error is reported as Pi reports one: the run finished, and
+        // the gateway says which model error ended it.
+        if (result.reason === "model_error") {
+          return {
+            ok: true,
+            code: 0,
+            stdout: "",
+            stderr: "",
+            streamedTextCount,
+            modelError: result.detail || "the model request failed",
+            undeliveredText: undeliveredTexts.join("\n\n"),
+          };
+        }
         return {
           ok: false,
           code: 1,
           stdout: "",
-          stderr: `Durable submission was not answered: ${result.reason || "unknown"}${result.detail ? ` (${result.detail})` : ""}`,
+          stderr: describeUnanswered(result.reason, result.detail),
           streamedTextCount,
         };
       }
       for (const answer of result.answers || []) {
         if (deliveredEntries.has(answer.entryId)) continue;
         deliveredEntries.add(answer.entryId);
-        if (!answer.text) continue;
+        if (!answer.text || !streamAssistantMessages) continue;
         try {
           // The live watch may already have sent this entry; delivery is keyed
           // by entry, so a replayed view or a late settle cannot duplicate it.
@@ -88,6 +103,24 @@ export async function runDurableTopic(driver, config, telegram, topic, envelope,
   } finally {
     unsubscribe?.();
   }
+}
+
+const UNANSWERED_REASONS = {
+  no_model: "the configured model is not available",
+  aborted: "the run was aborted",
+  reset: "the context was reset before an answer",
+  faulted: "the run failed inside the Durable host",
+  orphaned: "the run could not continue after a host change",
+  interrupted: "the host stopped while the model was answering",
+  restart_limit: "the run was cut off by repeated host restarts",
+  nothing_to_answer: "there was nothing new to answer",
+  turn_limit: "the run reached its tool-round limit",
+  stale: "the message was superseded before it ran",
+};
+
+export function describeUnanswered(reason, detail) {
+  const label = UNANSWERED_REASONS[reason] || `reason ${reason || "unknown"}`;
+  return `Durable run ended without an answer: ${label}${detail ? ` (${detail})` : ""}.`;
 }
 
 // One assistant entry can hold several text blocks; Telegram shows them as one
@@ -173,10 +206,7 @@ export function durableEventToPiEvents(event, turnIndex = 0) {
     const message = event.entry?.model?.find((candidate) => candidate.role === "assistant");
     return message ? [{ type: "message_end", message }] : [];
   }
-  if (event.type === "tool_execution_end") {
-    const message = event.entry?.model?.find((candidate) => candidate.role === "toolResult");
-    return [{ ...event, isError: message?.isError === true }];
-  }
+  if (event.type === "tool_execution_end") return [toolEndPiEvent(event)];
   if ([
     "turn_end",
     "tool_execution_start",
@@ -214,4 +244,47 @@ export async function stageEnvelopeAttachments(driver, endpoint, envelope) {
         : attachment)),
     };
   }
+}
+
+// A tool's end in Pi's shape: the result's content and details, so delivery
+// detection (`details.message_id`) and tool cards see what Pi topics see.
+function toolEndPiEvent(event) {
+  const message = event.entry?.model?.find((candidate) => candidate.role === "toolResult");
+  return {
+    type: "tool_execution_end",
+    toolCallId: event.toolCallId,
+    toolName: event.toolName,
+    isError: message?.isError === true || event.isError === true,
+    result: { content: message?.content || [], details: message?.details },
+  };
+}
+
+// The events a topic's `display_messages` renders, in Pi's shapes. Durable
+// commits an answer whole, so its reasoning, text and tool calls are shown
+// when the entry commits, as Pi shows each block when it ends.
+export function durableEventToDisplayEvents(event) {
+  if (!event || typeof event !== "object") return [];
+  if (event.type === "message_end") {
+    const message = event.entry?.model?.[0];
+    if (message?.role === "assistant") {
+      const blocks = Array.isArray(message.content) ? message.content : [];
+      return blocks.flatMap((block) => {
+        if (block?.type === "thinking" && String(block.thinking || "").trim()) {
+          return [{ type: "message_update", assistantMessageEvent: { type: "thinking_end", content: block.thinking } }];
+        }
+        if (block?.type === "text" && String(block.text || "").trim()) {
+          return [{ type: "message_update", assistantMessageEvent: { type: "text_end", content: block.text } }];
+        }
+        if (block?.type === "toolCall") {
+          return [{ type: "message_update", assistantMessageEvent: { type: "toolcall_end", toolCall: block } }];
+        }
+        return [];
+      });
+    }
+    if (message?.role === "toolResult" || message?.role === "custom") return [{ type: "message_end", message }];
+    return [];
+  }
+  if (event.type === "tool_execution_end") return [toolEndPiEvent(event)];
+  if (event.type === "tool_execution_start" || event.type === "tool_execution_update") return [event];
+  return [];
 }

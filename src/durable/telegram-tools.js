@@ -105,7 +105,7 @@ export function createDurableTelegramExtension(gatewayRequest, metadataDoc) {
             }, context);
             return {
               output: [{ type: "text", text: `Image sent to Telegram (message_id: ${result.messageId})` }],
-              details: result,
+              details: { ...result, message_id: String(result.messageId) },
             };
           } catch (error) {
             return failed(error);
@@ -146,7 +146,7 @@ export function createDurableTelegramExtension(gatewayRequest, metadataDoc) {
             }, context);
             return {
               output: [{ type: "text", text: `Buttons sent to Telegram (message_id: ${result.messageId}). The user's tap will arrive as their next reply.` }],
-              details: result,
+              details: { ...result, message_id: String(result.messageId) },
             };
           } catch (error) {
             return failed(error);

@@ -31,6 +31,17 @@ try {
     onReport: (report) => console.error(`durable report ${report?.kind || "unknown"}: ${report?.error instanceof Error ? report.error.stack || report.error.message : report?.error}`),
     onSshLog: (text) => console.error(`durable ssh: ${String(text).trim()}`),
     gatewayRequest,
+    // A card a bridged Pi extension posted; the gateway shows it if the
+    // topic's display_messages asks for it. Before the peer connects there is
+    // no run to show it in.
+    onCustomMessage: (endpointKey, message) => {
+      if (!peer) return;
+      void send(durableFrame("event", {
+        nonce: args.nonce,
+        event: "conversation.custom_message",
+        data: { endpointKey, message },
+      })).catch(() => undefined);
+    },
   });
   peer = await connectBrokerPeer(args.socket, { maxFrameBytes: MAX_DURABLE_FRAME_BYTES });
   await peer.send(durableFrame("host.connect", { nonce: args.nonce, pid: process.pid }));

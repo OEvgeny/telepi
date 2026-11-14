@@ -22,6 +22,7 @@ import { createDurableGatewayToolHandler } from "./durable/gateway-tools.js";
 import {
   abortDurableTopic,
   compactDurableTopic,
+  durableEventToDisplayEvents,
   durableEventToPiEvents,
   durableUnavailableMessage,
   runDurableTopic,
@@ -270,6 +271,10 @@ function sendLongMessage(telegram, message) {
 }
 
 function handleDurableDriverEvent(getConfig, telegram, inFlight, event, data) {
+  if (event === "conversation.custom_message") {
+    handleDurableCustomMessage(getConfig, telegram, inFlight, data);
+    return;
+  }
   if (event !== "conversation.events" || !Array.isArray(data?.events)) return;
   const config = getConfig();
   const topic = config.topics.find((candidate) => (
@@ -285,11 +290,40 @@ function handleDurableDriverEvent(getConfig, telegram, inFlight, event, data) {
     for (const piEvent of piEvents) {
       telegram.updateTurnStatusFromPiEvent(active, piEvent);
       telegram.resetReasoningDisplayFromPiEvent(active, piEvent);
+      // A reply sent by a tool (photo, buttons) is output, as on Pi topics.
+      if (telegram.isDeliveryEvent(piEvent)) {
+        active.telegramDeliveryCount = (active.telegramDeliveryCount || 0) + 1;
+        telegram.noteTurnStatusVisibleActivity(active);
+      }
+    }
+    const display = active.display;
+    if (display && !display.useDefaultAssistantDisplay && active.envelope) {
+      for (const displayEvent of durableEventToDisplayEvents(durableEvent)) {
+        telegram.queueDisplayPiEvent(active, active.envelope, displayEvent, display.displayMessages, {
+          excludeTypes: display.streamAssistantMessages ? ["assistant/message"] : [],
+        });
+      }
     }
     if (durableEvent.type === "task_failed") {
       active.lastModelError = durableEvent.message || "Durable task failed";
     }
   }
+}
+
+// A Pi extension running for a Durable topic posted a card (`pi.sendMessage`):
+// show it if the topic's `display_messages` asks for that custom type.
+function handleDurableCustomMessage(getConfig, telegram, inFlight, data) {
+  const message = data?.message;
+  if (message?.role !== "custom") return;
+  const config = getConfig();
+  const topic = config.topics.find((candidate) => (
+    isDurableTopic(candidate) && durableEndpointKey(candidate) === data.endpointKey
+  ));
+  if (!topic) return;
+  const active = inFlight.get(`${topic.chat_id}:${topic.topic_id}`);
+  if (!active?.envelope) return;
+  const displayMessages = configuredDisplayMessages(config, topic);
+  telegram.queueDisplayPiEvent(active, active.envelope, { type: "message_end", message }, displayMessages);
 }
 
 function isHelpCommand(text) {
@@ -662,7 +696,11 @@ async function handleTopicMessage(config, telegram, topic, envelope, active) {
   let result;
   try {
     if (backend === "durable") {
+      // Durable events arrive outside this call; keep the topic's display
+      // settings on the run so they are applied as for a Pi topic.
+      active.display = { displayMessages, useDefaultAssistantDisplay, streamAssistantMessages };
       result = await runDurableTopic(durableDriver, config, telegram, topic, envelope, active);
+      if (result.modelError) active.lastModelError = result.modelError;
     } else {
       const piRun = await startPiForTopic(config, topic, envelope, {
         onText: streamAssistantMessages

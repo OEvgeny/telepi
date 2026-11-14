@@ -354,3 +354,51 @@ test("Telegram attachments are copied to an SSH conversation's machine", async (
   assert.equal(local.location, "local");
   assert.deepEqual(local.attachments.map((attachment) => attachment.path), [photo, voice]);
 });
+
+test("Durable expands /skill: commands and honors context_files: false, as Pi does", async (t) => {
+  const paths = await fixture(t);
+  const skillDir = join(paths.directory, "skills", "demo");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(join(skillDir, "SKILL.md"), "---\nname: demo\ndescription: A demo skill.\n---\n\nDEMO_SKILL_BODY\n");
+  await writeFile(join(paths.workspace, "AGENTS.md"), "PROJECT_CONTEXT_SENTINEL\n");
+
+  const faux = fauxProvider();
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const requests = [];
+  faux.setResponses([
+    (context) => { requests.push(JSON.stringify(context)); return fauxAssistantMessage("one"); },
+    (context) => { requests.push(JSON.stringify(context)); return fauxAssistantMessage("two"); },
+  ]);
+  const host = await openDurableHost({
+    storageDir: paths.directory,
+    infrastructureAgentDir: paths.agentDir,
+    projectRoot: paths.directory,
+    models,
+    settingsManager: SettingsManager.inMemory({}),
+  });
+  t.after(() => host.close());
+
+  await host.ensureEndpoint({
+    ...endpoint("endpoint:skills", paths.workspace, paths.agentDir),
+    skillPaths: [join(skillDir, "SKILL.md")],
+  });
+  let submitted = await host.submit("endpoint:skills", { requestId: "skill-1", content: "/skill:demo do the thing" });
+  await host.waitSubmission("endpoint:skills", submitted.submissionId);
+  assert.match(requests[0], /<skill name=\\"demo\\" location=/);
+  assert.match(requests[0], /DEMO_SKILL_BODY/);
+  assert.match(requests[0], /do the thing/);
+  assert.doesNotMatch(requests[0], /\/skill:demo/);
+  // With context files on, the project's AGENTS.md is in the prompt.
+  assert.match(requests[0], /PROJECT_CONTEXT_SENTINEL/);
+
+  await host.ensureEndpoint({
+    ...endpoint("endpoint:no-context", paths.workspace, paths.agentDir),
+    noContextFiles: true,
+    systemPrompt: "IDENTITY_SENTINEL",
+  });
+  submitted = await host.submit("endpoint:no-context", { requestId: "no-context-1", content: "hello" });
+  await host.waitSubmission("endpoint:no-context", submitted.submissionId);
+  assert.doesNotMatch(requests[1], /PROJECT_CONTEXT_SENTINEL/);
+  assert.match(requests[1], /IDENTITY_SENTINEL/);
+});
