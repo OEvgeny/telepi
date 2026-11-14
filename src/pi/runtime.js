@@ -78,7 +78,7 @@ export async function createTopicRuntime(pi, config, topic, options = {}) {
       resourceLoaderOptions: {
         additionalExtensionPaths: spec.extensionPaths,
         additionalSkillPaths: spec.skillPaths,
-        extensionFactories: piCompactionPolicyFactories(pi.compact),
+        extensionFactories: piCompactionPolicyFactories(pi.compact, settingsManager),
         appendSystemPrompt: spec.appendSystemPrompt,
         noContextFiles: spec.noContextFiles,
       },

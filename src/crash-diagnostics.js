@@ -1,10 +1,12 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 // A gateway that dies without saying why costs hours of guessing. These
 // handlers make every abnormal exit leave a machine-readable record with the
 // error, the process footprint, and the in-flight registry at that moment.
 const MAX_CAUSE_DEPTH = 3;
+// A repeating rejection writes a record each time; keep the newest ones only.
+export const MAX_CRASH_RECORDS = 50;
 
 export function describeError(value, depth = 0) {
   if (!(value instanceof Error)) {
@@ -30,6 +32,7 @@ export function createCrashRecorder({
   pid = process.pid,
   uptime = () => process.uptime(),
   memory = () => process.memoryUsage(),
+  maxRecords = MAX_CRASH_RECORDS,
 }) {
   const dir = resolve(cacheDir, "crashes");
   return {
@@ -65,6 +68,7 @@ export function createCrashRecorder({
         mkdirSync(dir, { recursive: true });
         path = resolve(dir, `${at.replace(/[:.]/gu, "-")}-${kind}.json`);
         writeFileSync(path, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+        pruneRecords(dir, maxRecords);
       } catch (writeError) {
         path = null;
         log(`gateway crash record write failed: ${describeError(writeError).message}`);
@@ -81,16 +85,32 @@ export function createCrashRecorder({
 
 // Losing one Telegram edit must not kill the router: a rejected promise has no
 // owner here, so Node would treat it as fatal. Record it and keep serving.
-export function installCrashDiagnostics({ cacheDir, snapshot, log, processRef = process, ...rest }) {
+//
+// An uncaught exception is different: it can leave the process half-broken
+// (a dead socket server, a stopped loop) while it still looks alive, and
+// systemd restarts only a process that exits. Record it, then exit non-zero.
+export function installCrashDiagnostics({
+  cacheDir,
+  snapshot,
+  log,
+  processRef = process,
+  exit = (code) => processRef.exit(code),
+  ...rest
+}) {
   const recorder = createCrashRecorder({ cacheDir, snapshot, log, ...rest });
+  let exiting = false;
   const onRejection = (reason) => {
     recorder.record("unhandledRejection", reason);
   };
   const onException = (error) => {
+    if (exiting) return;
+    exiting = true;
     recorder.record("uncaughtException", error);
+    exit(1);
   };
   const onExit = (code) => {
-    if (code === 0) return;
+    // An exit that follows a recorded exception already has its record.
+    if (code === 0 || exiting) return;
     recorder.record("exit", new Error(`gateway exited with code ${code}`));
   };
   processRef.on("unhandledRejection", onRejection);
@@ -104,4 +124,11 @@ export function installCrashDiagnostics({ cacheDir, snapshot, log, processRef = 
       processRef.off("exit", onExit);
     },
   };
+}
+
+function pruneRecords(dir, maxRecords) {
+  const files = readdirSync(dir).filter((name) => name.endsWith(".json")).sort();
+  for (const name of files.slice(0, Math.max(0, files.length - maxRecords))) {
+    rmSync(resolve(dir, name), { force: true });
+  }
 }

@@ -1,4 +1,4 @@
-import { compact } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, compact, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 const REGISTRATION_CHANNEL = "telepi:compaction-reasoning-budget:register";
 
@@ -8,8 +8,9 @@ export const COMPACTION_REQUEST_OVERRIDES = Object.freeze({
   }),
 });
 
-export function createPiCompactionPolicyExtension(compactFn) {
+export function createPiCompactionPolicyExtension(compactFn, options = {}) {
   if (typeof compactFn !== "function") throw new TypeError("Pi compact function is required");
+  const getRetrySettings = options.getRetrySettings;
 
   return function compactionReasoningBudget(pi) {
     // Direct discovery can overlap Telepi's preloaded copy of the policy.
@@ -31,6 +32,8 @@ export function createPiCompactionPolicyExtension(compactFn) {
         modelContext,
         withCompactionRequestOptions(options, model.provider),
       );
+      // Pi's own compaction passes its retry policy, so a dropped stream is
+      // retried instead of failing the compaction; keep that here.
       const compaction = await compactFn(
         event.preparation,
         context.model,
@@ -40,6 +43,8 @@ export function createPiCompactionPolicyExtension(compactFn) {
         event.signal,
         context.thinkingLevel,
         streamFn,
+        undefined,
+        readRetrySettings(getRetrySettings, context),
       );
       return { compaction };
     });
@@ -67,4 +72,16 @@ export function withCompactionRequestOptions(options, provider) {
  * Pi's extension loader maps this import to the active Pi installation, so a
  * linked copy never mixes its host runtime with Telepi's package dependency.
  */
-export default createPiCompactionPolicyExtension(compact);
+export default createPiCompactionPolicyExtension(compact, {
+  getRetrySettings: (context) => SettingsManager.create(context.cwd, getAgentDir()).getRetrySettings(),
+});
+
+function readRetrySettings(getRetrySettings, context) {
+  if (typeof getRetrySettings !== "function") return undefined;
+  try {
+    return getRetrySettings(context) ?? undefined;
+  } catch {
+    // Without settings, compaction still runs once, as before.
+    return undefined;
+  }
+}

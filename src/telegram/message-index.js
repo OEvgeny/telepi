@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 const MAX_RECORDS = 12_000;
@@ -7,23 +7,27 @@ const MAX_TEXT_CHARS = 16_384;
 const MAX_ATTACHMENTS = 10;
 
 export class TelegramMessageIndex {
-  constructor(path) {
+  constructor(path, { maxRecords = MAX_RECORDS, keptRecords = KEPT_RECORDS } = {}) {
     this.path = path;
     this.records = new Map();
+    this.maxRecords = maxRecords;
+    this.keptRecords = keptRecords;
+    this.lines = 0;
   }
 
   init() {
     mkdirSync(dirname(this.path), { recursive: true });
     if (!existsSync(this.path)) return;
     let lines = readFileSync(this.path, "utf8").split("\n").filter(Boolean);
-    if (lines.length > MAX_RECORDS) {
-      lines = lines.slice(-KEPT_RECORDS);
+    if (lines.length > this.maxRecords) {
+      lines = lines.slice(-this.keptRecords);
       writeFileSync(this.path, `${lines.join("\n")}\n`);
     }
+    this.lines = lines.length;
     for (const line of lines) {
       try {
         const record = normalizeRecord(JSON.parse(line));
-        if (record) this.records.set(recordKey(record.chat_id, record.message_id), record);
+        if (record) this.remember(record);
       } catch {
         // A malformed historical row does not invalidate the rest of the index.
       }
@@ -33,9 +37,29 @@ export class TelegramMessageIndex {
   record(input) {
     const record = normalizeRecord(input);
     if (!record) return null;
-    this.records.set(recordKey(record.chat_id, record.message_id), record);
+    this.remember(record);
     appendFileSync(this.path, `${JSON.stringify(record)}\n`);
+    this.lines += 1;
+    // The gateway runs for weeks: trim while it runs, not only at startup,
+    // so neither the file nor the in-memory map grows without bound.
+    if (this.lines > this.maxRecords) this.compact();
     return record;
+  }
+
+  // Newest last: a rewritten message moves to the end, so trimming keeps it.
+  remember(record) {
+    const key = recordKey(record.chat_id, record.message_id);
+    this.records.delete(key);
+    this.records.set(key, record);
+  }
+
+  compact() {
+    const kept = [...this.records.values()].slice(-this.keptRecords);
+    this.records = new Map(kept.map((record) => [recordKey(record.chat_id, record.message_id), record]));
+    const temporary = `${this.path}.tmp`;
+    writeFileSync(temporary, kept.map((record) => `${JSON.stringify(record)}\n`).join(""));
+    renameSync(temporary, this.path);
+    this.lines = kept.length;
   }
 
   find(chatId, messageId) {

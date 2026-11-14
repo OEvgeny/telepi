@@ -25,12 +25,17 @@ test("crash diagnostics record the error, footprint, and in-flight registry", as
   t.after(() => rm(directory, { recursive: true, force: true }));
   const processRef = new EventEmitter();
   const logged = [];
+  const exits = [];
   const inflight = { active: [{ key: "10:20", topic: "Pilot" }], pendingCount: 3 };
   const { recorder } = installCrashDiagnostics({
     cacheDir: directory,
     snapshot: () => inflight,
     log: (message) => logged.push(message),
     processRef,
+    exit: (code) => {
+      exits.push(code);
+      processRef.emit("exit", code);
+    },
     now: () => new Date("2026-10-30T07:35:26.000Z"),
     pid: 4242,
     uptime: () => 187,
@@ -38,11 +43,15 @@ test("crash diagnostics record the error, footprint, and in-flight registry", as
   });
 
   const failure = new TypeError("fetch failed", { cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }) });
-  // Both handlers must swallow the event: the gateway keeps serving.
   assert.equal(processRef.listeners("unhandledRejection").length, 1);
   assert.equal(processRef.listeners("uncaughtException").length, 1);
+  // A rejection is recorded and the gateway keeps serving.
   processRef.emit("unhandledRejection", failure);
+  assert.deepEqual(exits, []);
+  // An uncaught exception is recorded once, then the process exits so
+  // systemd restarts it; the exit adds no second record.
   processRef.emit("uncaughtException", new Error("boom"));
+  assert.deepEqual(exits, [1]);
 
   const files = (await readdir(recorder.dir)).sort();
   assert.deepEqual(files, [
@@ -147,4 +156,22 @@ test("a failed Telegram edit does not leave the display queue rejected", async (
   assert.equal(ran, true);
   stop();
   await active.displayQueue;
+});
+
+test("crash diagnostics keep only the newest records", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "telepi-crash-prune-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let second = 0;
+  const { recorder } = installCrashDiagnostics({
+    cacheDir: directory,
+    log: () => undefined,
+    processRef: new EventEmitter(),
+    exit: () => undefined,
+    now: () => new Date(Date.UTC(2026, 9, 30, 7, 0, second++)),
+    maxRecords: 3,
+  });
+  for (let index = 0; index < 5; index += 1) recorder.record("unhandledRejection", new Error(`r${index}`));
+  const files = (await readdir(recorder.dir)).sort();
+  assert.equal(files.length, 3);
+  assert.match(files[0], /07-00-02/);
 });

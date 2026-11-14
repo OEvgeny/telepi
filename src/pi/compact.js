@@ -83,7 +83,7 @@ export async function compactPiSession(config, topic, instructions, options = {}
       resourceLoaderOptions: {
         additionalExtensionPaths: spec.extensionPaths,
         additionalSkillPaths: spec.skillPaths,
-        extensionFactories: piCompactionPolicyFactories(pi.compact),
+        extensionFactories: piCompactionPolicyFactories(pi.compact, settingsManager),
         appendSystemPrompt: spec.appendSystemPrompt,
         noContextFiles: spec.noContextFiles,
       },

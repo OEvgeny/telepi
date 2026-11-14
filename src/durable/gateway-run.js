@@ -35,7 +35,7 @@ export async function runDurableTopic(driver, config, telegram, topic, envelope,
       for (const durableEvent of data.events) {
         if (durableEvent?.type !== "message_end") continue;
         const text = assistantTextFromEntry(durableEvent.entry);
-        if (text) void textDelivery.deliver(text).catch(() => undefined);
+        if (text) void textDelivery.deliver(durableEvent.entry?.id, text).catch(() => undefined);
       }
     })
     : undefined;
@@ -56,7 +56,7 @@ export async function runDurableTopic(driver, config, telegram, topic, envelope,
           ok: false,
           code: 1,
           stdout: "",
-          stderr: `Durable submission was not answered: ${result.reason || "unknown"}`,
+          stderr: `Durable submission was not answered: ${result.reason || "unknown"}${result.detail ? ` (${result.detail})` : ""}`,
           streamedTextCount,
         };
       }
@@ -66,8 +66,8 @@ export async function runDurableTopic(driver, config, telegram, topic, envelope,
         if (!answer.text) continue;
         try {
           // The live watch may already have sent this entry; delivery is keyed
-          // by text so a snapshot replay or a late settle cannot duplicate it.
-          await textDelivery.deliver(answer.text);
+          // by entry, so a replayed view or a late settle cannot duplicate it.
+          await textDelivery.deliver(answer.entryId, answer.text, waiting.envelope);
           streamedTextCount += 1;
         } catch (error) {
           undeliveredTexts.push(answer.text);
@@ -103,29 +103,32 @@ export function assistantTextFromEntry(entry) {
 }
 
 // Live watch batches and the settled submission can name the same assistant
-// entry, and a watch overflow can replay one. Deduplicate by exact text so the
-// user sees each answer once while a Telegram failure keeps it retryable.
+// entry, and a replayed view can repeat one. Deduplicate by entry ID, not by
+// text: two entries that say the same words ("Checking.") are two messages.
+// A Telegram failure keeps the entry retryable.
 function createAssistantTextDelivery(telegram, active, envelope) {
   const delivered = new Set();
   const pending = new Map();
-  const send = (replyEnvelope, text) => telegram.queueAssistantTextDisplay(active, replyEnvelope, text).then(
+  const send = (key, replyEnvelope, text) => telegram.queueAssistantTextDisplay(active, replyEnvelope, text).then(
     () => {
-      delivered.add(text);
-      pending.delete(text);
+      delivered.add(key);
+      pending.delete(key);
       return true;
     },
     (error) => {
-      pending.delete(text);
+      pending.delete(key);
       throw error;
     },
   );
   return {
-    deliver(text, replyEnvelope = envelope) {
-      if (delivered.has(text)) return Promise.resolve(false);
-      const inFlight = pending.get(text);
+    deliver(entryId, text, replyEnvelope = envelope) {
+      // An entry without an ID cannot be matched later; key it by its text.
+      const key = entryId == null ? `text:${text}` : `entry:${entryId}`;
+      if (delivered.has(key)) return Promise.resolve(false);
+      const inFlight = pending.get(key);
       if (inFlight) return inFlight;
-      const attempt = send(replyEnvelope, text);
-      pending.set(text, attempt);
+      const attempt = send(key, replyEnvelope || envelope, text);
+      pending.set(key, attempt);
       return attempt;
     },
   };

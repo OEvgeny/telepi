@@ -180,6 +180,32 @@ test("Durable runs stream each committed assistant entry before the turn settles
   assert.equal(listeners.size, 0);
 });
 
+test("Durable runs deliver two entries with the same text twice", async () => {
+  const sent = [];
+  const driver = {
+    infrastructureAgentDir: "/tmp/infrastructure-agent",
+    onEvent() { return () => undefined; },
+    async ensureEndpoint() {},
+    async submit() { return { submissionId: 7 }; },
+    async waitSubmission() {
+      return { status: "done", answers: [{ entryId: 3, text: "Checking." }, { entryId: 5, text: "Checking." }] };
+    },
+    async abort() {},
+  };
+  const telegram = { async queueAssistantTextDisplay(_active, _envelope, text) { sent.push(text); } };
+  const active = { steered: [], resolveReady() {}, envelope: { chatId: "10", topicId: "20", messageId: "30" } };
+  const result = await runDurableTopic(
+    driver,
+    config,
+    telegram,
+    { ...config.topics[0], backend: "durable" },
+    { chatId: "10", topicId: "20", userId: "owner", userName: "Owner", messageId: "30", text: "Hi" },
+    active,
+  );
+  assert.deepEqual(sent, ["Checking.", "Checking."]);
+  assert.equal(result.streamedTextCount, 2);
+});
+
 test("Durable runs retain assistant text rejected by Telegram for final delivery", async () => {
   const driver = {
     infrastructureAgentDir: "/tmp/infrastructure-agent",

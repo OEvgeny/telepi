@@ -64,7 +64,8 @@ test("Pi extension runs stock compaction through an overridden Strata stream", a
     assert.equal(streamResult, "stream");
     return expectedCompaction;
   };
-  createPiCompactionPolicyExtension(compact)(bus.api(handlers));
+  const retry = { enabled: true, maxRetries: 3, baseDelayMs: 1000 };
+  createPiCompactionPolicyExtension(compact, { getRetrySettings: () => retry })(bus.api(handlers));
 
   const signal = new AbortController().signal;
   const event = {
@@ -87,7 +88,7 @@ test("Pi extension runs stock compaction through an overridden Strata stream", a
     compaction: expectedCompaction,
   });
   assert.equal(compactCalls.length, 1);
-  assert.deepEqual(compactCalls[0].slice(0, 8), [
+  assert.deepEqual(compactCalls[0].slice(0, 10), [
     event.preparation,
     context.model,
     undefined,
@@ -96,6 +97,8 @@ test("Pi extension runs stock compaction through an overridden Strata stream", a
     signal,
     "high",
     compactCalls[0][7],
+    undefined,
+    retry,
   ]);
   assert.deepEqual(streamCalls, [{
     model: { provider: "strata", id: "swift" },

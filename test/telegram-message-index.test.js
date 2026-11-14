@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -108,4 +108,18 @@ test("Telegram message lookup is current-topic-only and explains cache misses", 
     () => lookupTelegramMessage(config(), telegram, { ...request, messageId: "not-a-number" }),
     /positive integer/,
   );
+});
+
+test("the message index trims itself while the gateway runs", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "telepi-index-trim-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "sent-messages.jsonl");
+  const index = new TelegramMessageIndex(path, { maxRecords: 5, keptRecords: 3 });
+  index.init();
+  for (let id = 1; id <= 6; id += 1) index.record({ chat_id: "1", message_id: String(id), text: `m${id}` });
+  assert.equal(index.records.size, 3);
+  assert.equal(index.find("1", "1"), null);
+  assert.equal(index.find("1", "6").text, "m6");
+  const lines = (await readFile(path, "utf8")).split("\n").filter(Boolean);
+  assert.deepEqual(lines.map((line) => JSON.parse(line).message_id), ["4", "5", "6"]);
 });

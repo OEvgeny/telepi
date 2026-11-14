@@ -6,8 +6,9 @@ export const COMPACTION_REQUEST_OVERRIDES = Object.freeze({
   }),
 });
 
-export function createPiCompactionPolicyExtension(compact) {
+export function createPiCompactionPolicyExtension(compact, options = {}) {
   if (typeof compact !== "function") throw new TypeError("Pi compact function is required");
+  const getRetrySettings = options.getRetrySettings;
 
   return function compactionReasoningBudget(pi) {
     // A default Pi profile may discover the linked extension while Telepi also
@@ -31,6 +32,8 @@ export function createPiCompactionPolicyExtension(compact) {
         modelContext,
         withCompactionRequestOptions(options, model.provider),
       );
+      // Pi's own compaction passes its retry policy, so a dropped stream is
+      // retried instead of failing the compaction; keep that here.
       const compaction = await compact(
         event.preparation,
         context.model,
@@ -40,17 +43,21 @@ export function createPiCompactionPolicyExtension(compact) {
         event.signal,
         context.thinkingLevel,
         streamFn,
+        undefined,
+        readRetrySettings(getRetrySettings, context),
       );
       return { compaction };
     });
   };
 }
 
-export function piCompactionPolicyFactories(compact) {
+export function piCompactionPolicyFactories(compact, settingsManager) {
   return [{
     name: "telepi-compaction-reasoning-budget",
     hidden: true,
-    factory: createPiCompactionPolicyExtension(compact),
+    factory: createPiCompactionPolicyExtension(compact, {
+      getRetrySettings: settingsManager ? () => settingsManager.getRetrySettings() : undefined,
+    }),
   }];
 }
 
@@ -87,4 +94,14 @@ export function createDurableCompactionModels(models) {
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+}
+
+function readRetrySettings(getRetrySettings, context) {
+  if (typeof getRetrySettings !== "function") return undefined;
+  try {
+    return getRetrySettings(context) ?? undefined;
+  } catch {
+    // Without settings, compaction still runs once, as before.
+    return undefined;
+  }
 }
