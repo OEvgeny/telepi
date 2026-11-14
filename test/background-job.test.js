@@ -170,7 +170,7 @@ test("Durable background tool uses its selected execution environment", async (t
 
   assert.equal(result.isError, undefined, JSON.stringify(result));
   assert.equal(result.details.state, "finished");
-  assert.match(result.content[0].text, new RegExp(escapeRegex(paths.workspace)));
+  assert.match(result.output[0].text, new RegExp(escapeRegex(paths.workspace)));
 });
 
 function userSystemdAvailable() {

@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -67,7 +67,7 @@ export function createDurableTelegramExtension(gatewayRequest, metadataDoc) {
               currentTopicName: current.topicName,
             }, context);
             return {
-              content: [{ type: "text", text: `Message accepted for ${result.topic} (${result.agent}); status: ${result.status}.` }],
+              output: [{ type: "text", text: `Message accepted for ${result.topic} (${result.agent}); status: ${result.status}.` }],
               details: result,
             };
           } catch (error) {
@@ -104,7 +104,7 @@ export function createDurableTelegramExtension(gatewayRequest, metadataDoc) {
               replyToMessageId: params.reply_to_message_id,
             }, context);
             return {
-              content: [{ type: "text", text: `Image sent to Telegram (message_id: ${result.messageId})` }],
+              output: [{ type: "text", text: `Image sent to Telegram (message_id: ${result.messageId})` }],
               details: result,
             };
           } catch (error) {
@@ -145,7 +145,7 @@ export function createDurableTelegramExtension(gatewayRequest, metadataDoc) {
               topicName: current.topicName,
             }, context);
             return {
-              content: [{ type: "text", text: `Buttons sent to Telegram (message_id: ${result.messageId}). The user's tap will arrive as their next reply.` }],
+              output: [{ type: "text", text: `Buttons sent to Telegram (message_id: ${result.messageId}). The user's tap will arrive as their next reply.` }],
               details: result,
             };
           } catch (error) {
@@ -181,7 +181,7 @@ function remoteBaseName(path) {
 function messageLookupResult(result) {
   if (!result.found) {
     return {
-      content: [{ type: "text", text: `Telegram message ${result.messageId} is not in Telepi's local archive. ${result.limitation}` }],
+      output: [{ type: "text", text: `Telegram message ${result.messageId} is not in Telepi's local archive. ${result.limitation}` }],
       details: result,
     };
   }
@@ -189,12 +189,12 @@ function messageLookupResult(result) {
   const text = result.text || "[The archived message has no text or caption.]";
   const suffix = result.textTruncated ? "\n\n[Archived text was truncated.]" : "";
   return {
-    content: [{ type: "text", text: `Telegram message ${result.messageId} from ${author}:\n\n${text}${suffix}` }],
+    output: [{ type: "text", text: `Telegram message ${result.messageId} from ${author}:\n\n${text}${suffix}` }],
     details: result,
   };
 }
 
 function failed(error) {
   const message = error instanceof Error ? error.message : String(error);
-  return { content: [{ type: "text", text: `Failed: ${message}` }], isError: true, details: { error: message } };
+  return { output: [{ type: "text", text: `Failed: ${message}` }], isError: true, details: { error: message } };
 }

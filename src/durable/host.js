@@ -28,7 +28,7 @@ try {
     storageDir: args.storageDir,
     infrastructureAgentDir: args.infrastructureAgentDir,
     projectRoot: args.projectRoot,
-    onReport: (error) => console.error(`durable report: ${error instanceof Error ? error.stack || error.message : error}`),
+    onReport: (report) => console.error(`durable report ${report?.kind || "unknown"}: ${report?.error instanceof Error ? report.error.stack || report.error.message : report?.error}`),
     onSshLog: (text) => console.error(`durable ssh: ${String(text).trim()}`),
     gatewayRequest,
   });

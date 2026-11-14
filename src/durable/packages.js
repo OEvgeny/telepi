@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, parse } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const DURABLE_PACKAGE_VERSION = "1.0.4";
+export const DURABLE_PACKAGE_VERSION = "1.5.2";
 export const DURABLE_PACKAGE_FAMILY = [
   "@earendil-works/chord",
   "@earendil-works/pi-agent-core",

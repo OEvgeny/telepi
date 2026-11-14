@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import {

@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import {
   BACKGROUND_JOB_MAX_WAIT_SECONDS,
@@ -39,7 +39,9 @@ export function createDurableBackgroundJobExtension(options = {}) {
               cwd: api.env?.cwd,
               launchMode: options.launchMode,
             }, context);
-            return backgroundJobToolResult(job);
+            // The shared result is shaped for Pi (`content`); Durable reads `output`.
+            const { content, ...rest } = backgroundJobToolResult(job);
+            return { ...rest, output: content };
           } catch (error) {
             return failed(error);
           }
@@ -51,5 +53,5 @@ export function createDurableBackgroundJobExtension(options = {}) {
 
 function failed(error) {
   const message = error instanceof Error ? error.message : String(error);
-  return { content: [{ type: "text", text: `Failed: ${message}` }], isError: true, details: { error: message } };
+  return { output: [{ type: "text", text: `Failed: ${message}` }], isError: true, details: { error: message } };
 }

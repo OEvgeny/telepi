@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { Type, StringEnum } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 
 const ACTIONS = ["start", "navigate", "interact", "inspect", "verify", "capture", "close"];
@@ -186,7 +187,7 @@ export class RemoteBrowserManager {
         return failed(`Invalid remote browser response: ${output.slice(0, 1000)}`);
       }
       if (!response.ok) return failed(response.error || "Remote browser action failed");
-      return { content: [{ type: "text", text: response.text }], details: response.details || {} };
+      return { output: [{ type: "text", text: response.text }], details: response.details || {} };
     } catch (error) {
       return failed(error instanceof Error ? error.message : String(error));
     } finally {
@@ -286,7 +287,7 @@ async function findRemoteChromium(env, context) {
 }
 
 function failed(message) {
-  return { content: [{ type: "text", text: `Browser failed: ${message}` }], isError: true, details: { error: message } };
+  return { output: [{ type: "text", text: `Browser failed: ${message}` }], isError: true, details: { error: message } };
 }
 
 function safeName(value) {

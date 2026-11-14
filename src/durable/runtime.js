@@ -18,13 +18,14 @@ import {
   defineDocFamily,
   defineExtension,
   section,
-  watchEvents,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
+import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { RemoteExecutionEnv, sshConnection } from "@earendil-works/pi-env";
 import { createDurableCompactionModels } from "../compaction-policy.js";
+import { createViewEventTranslator } from "./view-events.js";
 import { applyHttpProxySettings, configurePiHttpDispatcher } from "../pi/http-dispatcher.js";
 import {
   loadLocalAgentContext,
@@ -37,7 +38,6 @@ import { resolveRemoteAgentResources } from "./remote-agent.js";
 import { RemoteBrowserManager, createRemoteBrowserExtension } from "./remote-browser.js";
 import { createDurableTelegramExtension } from "./telegram-tools.js";
 import { createDurableBackgroundJobExtension } from "./background-job-tool.js";
-import { createDurableImageExtension } from "./image-tool.js";
 import {
   sshConnectionKey,
   sshEnvironmentId,
@@ -52,6 +52,8 @@ export const EndpointDoc = defineDocFamily({
   version: 1,
   family: true,
   scope: "session",
+  // Small documents: keep every change as a delta (Durable 1.4 requires a choice).
+  checkpointWhen: () => false,
   initial: (endpointKey) => ({
     endpointKey,
     conversationId: null,
@@ -65,6 +67,7 @@ export const ConversationDoc = defineDoc({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: () => ({
     endpointKey: null,
     agentId: null,
@@ -112,15 +115,16 @@ export async function openDurableHost(options) {
     ConversationDoc,
   );
   const backgroundJobs = createDurableBackgroundJobExtension();
-  const images = createDurableImageExtension();
-  const runtimeExtensions = { prompt, remoteBrowser, telegram, backgroundJobs, images };
+  // Durable's `read` returns images itself: with a processor it orients,
+  // converts (BMP), and shrinks them to the model's limits before sending.
+  const codingTools = createCodingTools({ images: options.images || await createNodePhotonImages() });
+  const runtimeExtensions = { codingTools, prompt, remoteBrowser, telegram, backgroundJobs };
   const registry = createRegistry();
-  registry.install(CodingTools);
+  registry.install(codingTools);
   registry.install(prompt);
   registry.install(remoteBrowser);
   registry.install(telegram);
   registry.install(backgroundJobs);
-  registry.install(images);
   const envs = new ExecutionEnvs(options.projectRoot || process.cwd(), {
     knownHostsFile: join(storageDir, "ssh-known-hosts"),
     onLog: options.onSshLog,
@@ -132,16 +136,18 @@ export async function openDurableHost(options) {
     {
       models: harnessModels,
       registry,
-      settings: createHarnessSettings(settingsManager, [CodingTools, prompt, telegram, backgroundJobs, images]),
+      settings: createHarnessSettings(settingsManager, [codingTools, prompt, telegram, backgroundJobs]),
       env: envs.env,
       conversationCreated: async (tx, conversation) => {
         await tx.doc(ConversationDoc, conversation.id);
       },
-      onReport: (error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        reports.push({ at: new Date().toISOString(), message });
+      // Durable 1.5 passes one tagged Report: `kind` and the `error`.
+      onReport: (report) => {
+        const error = report?.error;
+        const message = error instanceof Error ? error.message : String(error ?? report?.kind ?? "unknown report");
+        reports.push({ at: new Date().toISOString(), kind: report?.kind ?? null, message });
         if (reports.length > 100) reports.shift();
-        options.onReport?.(error);
+        options.onReport?.(report);
       },
     },
     context,
@@ -167,10 +173,35 @@ export async function openDurableHost(options) {
       const key = requireString(endpointKey, "endpointKey");
       if (watches.has(key)) return;
       const conversation = await resolveEndpointConversation(harness, key);
-      const stream = await watchEvents(harness, conversation.id, context);
-      stream.start(async (events) => listener(events));
-      watches.set(key, stream);
-      await listener([stream.snapshot]);
+      const deliver = (value) => {
+        const events = translator.advance(value);
+        if (!events.length) return;
+        try {
+          listener(events);
+        } catch (error) {
+          console.error(`durable event delivery failed endpoint=${key}: ${error instanceof Error ? error.message : error}`);
+        }
+      };
+      // The observation's value is the state at attachment; a commit can
+      // advance the observer before observeConversation() resolves, so hold
+      // those values until the translator has its starting point.
+      let translator;
+      let early = [];
+      let observation;
+      observation = await harness.observeConversation(conversation.id, {
+        advance(call) {
+          if (call?.kind !== "value") return;
+          if (!translator) early.push(call.value);
+          else deliver(call.value);
+        },
+        end() {
+          if (observation && watches.get(key) === observation) watches.delete(key);
+        },
+      }, context);
+      translator = createViewEventTranslator(observation.value);
+      for (const value of early) deliver(value);
+      early = [];
+      watches.set(key, observation);
     },
 
     async submit(endpointKey, draft) {
@@ -256,7 +287,7 @@ export async function openDurableHost(options) {
       if (closed) return;
       closed = true;
       if (waitForIdle) await harness.waitForIdle(context);
-      for (const stream of watches.values()) await stream.stop();
+      for (const observation of watches.values()) observation.detach();
       watches.clear();
       try {
         await harness.close(context);
@@ -333,11 +364,10 @@ function buildAgentChange(models, spec, runtimeExtensions) {
     model: { provider: parsed.provider, modelId: parsed.modelId },
     thinkingLevel,
     extensions: [
-      CodingTools,
+      runtimeExtensions.codingTools,
       runtimeExtensions.prompt,
       runtimeExtensions.telegram,
       runtimeExtensions.backgroundJobs,
-      runtimeExtensions.images,
       ...(spec.browserPackageRoot ? [runtimeExtensions.remoteBrowser] : []),
     ],
     cwd: endpointCwd(spec),
