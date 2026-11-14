@@ -120,6 +120,12 @@ export class DurableDriver {
     });
   }
 
+  // Idempotent: the same files land at the same paths, so a retry after a
+  // lost connection is safe.
+  stageAttachments(endpointKey, request) {
+    return this.request("attachments.stage", { endpointKey, request }, { timeoutMs: 120_000 });
+  }
+
   waitSubmission(endpointKey, submissionId) {
     return this.request("submission.wait", { endpointKey, submissionId }, {
       operationId: `wait:${endpointKey}:${submissionId}`,

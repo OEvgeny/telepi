@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -291,4 +291,66 @@ test("Durable model specs preserve model tags and parse explicit thinking", () =
     thinkingLevel: "xhigh",
   });
   assert.throws(() => parseModelSpec("missing-provider"), /Invalid Durable model/);
+});
+
+test("Telegram attachments are copied to an SSH conversation's machine", async (t) => {
+  const paths = await fixture(t);
+  const remoteState = join(paths.directory, "remote-state");
+  const gatewayCache = join(paths.directory, "gateway-cache");
+  await mkdir(gatewayCache);
+  const photo = join(gatewayCache, "42-photo.jpg");
+  const voice = join(gatewayCache, "42-voice.ogg");
+  await writeFile(photo, Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]));
+  await writeFile(voice, "OggS-voice");
+
+  const faux = fauxProvider();
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const platform = process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux";
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  // The daemon stands in for the remote machine; its state home is a temp dir.
+  const connection = new Connection({
+    command: ["env", `XDG_STATE_HOME=${remoteState}`, packagedDaemon({ platform, arch })],
+  });
+  const host = await openDurableHost({
+    storageDir: paths.directory,
+    infrastructureAgentDir: paths.agentDir,
+    projectRoot: paths.directory,
+    models,
+    settingsManager: SettingsManager.inMemory({}),
+    sshConnectionFactory: () => ({ connection }),
+  });
+  t.after(() => host.close());
+
+  await host.ensureEndpoint(endpoint("endpoint:remote-files", paths.workspace, paths.agentDir, {
+    location: { type: "ssh", host: "test.invalid", user: "tester" },
+  }));
+  const request = {
+    chatId: "-100123",
+    topicId: "7",
+    attachments: [
+      { type: "image", path: photo, mimeType: "image/jpeg" },
+      { type: "audio", path: voice, mimeType: "audio/ogg" },
+    ],
+  };
+  const staged = await host.stageAttachments("endpoint:remote-files", request);
+  assert.equal(staged.location, "ssh");
+  const expectedDir = join(remoteState, "telepi", "attachments", "-100123", "7");
+  assert.deepEqual(staged.attachments.map((attachment) => attachment.path), [
+    join(expectedDir, "42-photo.jpg"),
+    join(expectedDir, "42-voice.ogg"),
+  ]);
+  assert.equal(staged.attachments[0].gatewayPath, photo);
+  assert.deepEqual(await readFile(staged.attachments[0].path), await readFile(photo));
+  assert.equal(await readFile(staged.attachments[1].path, "utf8"), "OggS-voice");
+
+  // A retry writes the same paths, so the prompt text does not change.
+  const again = await host.stageAttachments("endpoint:remote-files", request);
+  assert.deepEqual(again.attachments.map((attachment) => attachment.path), staged.attachments.map((attachment) => attachment.path));
+
+  // A local conversation keeps the gateway paths: the files are already there.
+  await host.ensureEndpoint(endpoint("endpoint:local-files", paths.otherWorkspace, paths.agentDir));
+  const local = await host.stageAttachments("endpoint:local-files", request);
+  assert.equal(local.location, "local");
+  assert.deepEqual(local.attachments.map((attachment) => attachment.path), [photo, voice]);
 });

@@ -135,6 +135,8 @@ async function dispatch(method, params) {
     }
     case "submission.submit":
       return runtime.submit(params.endpointKey, params.submission || {});
+    case "attachments.stage":
+      return runtime.stageAttachments(params.endpointKey, params.request || {});
     case "submission.wait":
       return runtime.waitSubmission(params.endpointKey, params.submissionId);
     case "conversation.abort":

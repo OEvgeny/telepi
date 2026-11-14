@@ -8,9 +8,10 @@ export async function runDurableTopic(driver, config, telegram, topic, envelope,
 
   const waits = [];
   const submit = async (nextEnvelope, whenBusy) => {
+    const staged = await stageEnvelopeAttachments(driver, endpoint, nextEnvelope);
     const admitted = await driver.submit(
       endpoint.endpointKey,
-      buildDurableSubmission(config, topic, nextEnvelope, { whenBusy }),
+      buildDurableSubmission(config, topic, staged, { whenBusy }),
     );
     waits.push({ submissionId: admitted.submissionId, envelope: nextEnvelope });
     return admitted;
@@ -186,4 +187,31 @@ export function durableEventToPiEvents(event, turnIndex = 0) {
     "compaction_end",
   ].includes(event.type)) return [event];
   return [];
+}
+
+// Attachments are downloaded on the gateway host. For a conversation at an SSH
+// location, copy them to that machine so the paths in the prompt are real
+// there. If the copy fails, the message still goes through: each attachment
+// says it is unavailable and why, instead of naming a path that does not exist.
+export async function stageEnvelopeAttachments(driver, endpoint, envelope) {
+  const attachments = envelope?.attachments || [];
+  if (endpoint?.location?.type !== "ssh" || !attachments.some((attachment) => attachment?.path)) return envelope;
+  if (typeof driver.stageAttachments !== "function") return envelope;
+  try {
+    const staged = await driver.stageAttachments(endpoint.endpointKey, {
+      chatId: envelope.chatId,
+      topicId: envelope.topicId,
+      attachments,
+    });
+    return { ...envelope, attachments: staged.attachments };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Durable attachment staging failed endpoint=${endpoint.endpointKey}: ${message}`);
+    return {
+      ...envelope,
+      attachments: attachments.map((attachment) => (attachment?.path
+        ? { ...attachment, unavailable: `not copied to ${endpoint.location.host}: ${message}` }
+        : attachment)),
+    };
+  }
 }

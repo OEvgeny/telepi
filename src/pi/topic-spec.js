@@ -164,6 +164,13 @@ function formatReplyContext(replyTo) {
 }
 
 function formatAttachment(attachment) {
+  if (attachment.unavailable) {
+    return [
+      `- ${attachment.type}: unavailable (${attachment.unavailable})`,
+      attachment.fileName ? `  filename: ${attachment.fileName}` : undefined,
+      attachment.mimeType ? `  mime_type: ${attachment.mimeType}` : undefined,
+    ].filter(Boolean).join("\n");
+  }
   return [
     `- ${attachment.type}: ${attachment.path}`,
     attachment.fileName ? `  filename: ${attachment.fileName}` : undefined,

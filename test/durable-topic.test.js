@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { readConfig } from "../src/config.js";
-import { durableEventToPiEvents, durableUnavailableMessage, runDurableTopic } from "../src/durable/gateway-run.js";
+import { durableEventToPiEvents, durableUnavailableMessage, runDurableTopic, stageEnvelopeAttachments } from "../src/durable/gateway-run.js";
 import {
   buildDurableEndpointSpec,
   buildDurableSubmission,
@@ -346,4 +346,41 @@ test("topic:set-backend is the only writer needed to opt a topic in and back out
     "topic:set-backend", "--name", "Pilot", "--backend", "pi",
   ], { cwd: root });
   assert.equal(readConfig(configPath).topics[0].backend, undefined);
+});
+
+test("Durable SSH submissions name attachments by their path on the remote machine", async () => {
+  const sshEndpoint = { endpointKey: "telegram:10:20", location: { type: "ssh", host: "box" } };
+  const envelope = {
+    chatId: "10",
+    topicId: "20",
+    userId: "owner",
+    userName: "Owner",
+    messageId: "31",
+    text: "look",
+    attachments: [{ type: "image", path: "/gateway/cache/images/10/20/31-photo.jpg", mimeType: "image/jpeg" }],
+  };
+  const requests = [];
+  const driver = {
+    async stageAttachments(endpointKey, request) {
+      requests.push({ endpointKey, request });
+      return { attachments: request.attachments.map((attachment) => ({ ...attachment, path: "/home/u/.local/state/telepi/attachments/10/20/31-photo.jpg" })) };
+    },
+  };
+  const staged = await stageEnvelopeAttachments(driver, sshEndpoint, envelope);
+  assert.equal(requests.length, 1);
+  const content = buildDurableSubmission(config, config.topics[0], staged).content;
+  assert.match(content, /- image: \/home\/u\/\.local\/state\/telepi\/attachments\/10\/20\/31-photo\.jpg/);
+  assert.doesNotMatch(content, /\/gateway\/cache/);
+
+  // A local conversation reads the gateway path directly: no copy.
+  const local = await stageEnvelopeAttachments(driver, { ...sshEndpoint, location: { type: "local" } }, envelope);
+  assert.equal(local, envelope);
+  assert.equal(requests.length, 1);
+
+  // A failed copy keeps the message, says why, and names no gateway path.
+  const failing = { async stageAttachments() { throw new Error("ssh: connection refused"); } };
+  const unavailable = await stageEnvelopeAttachments(failing, sshEndpoint, envelope);
+  const failedContent = buildDurableSubmission(config, config.topics[0], unavailable).content;
+  assert.match(failedContent, /- image: unavailable \(not copied to box: ssh: connection refused\)/);
+  assert.doesNotMatch(failedContent, /\/gateway\/cache/);
 });

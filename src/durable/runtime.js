@@ -26,6 +26,7 @@ import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { RemoteExecutionEnv, sshConnection } from "@earendil-works/pi-env";
 import { createDurableCompactionModels } from "../compaction-policy.js";
 import { createViewEventTranslator } from "./view-events.js";
+import { stageAttachments } from "./attachments.js";
 import { applyHttpProxySettings, configurePiHttpDispatcher } from "../pi/http-dispatcher.js";
 import {
   loadLocalAgentContext,
@@ -213,6 +214,18 @@ export async function openDurableHost(options) {
         whenBusy: draft.whenBusy || "followUp",
       }, context);
       return { submissionId: submission.id, status: (await submission.status(context)).status };
+    },
+
+    // Telegram files are downloaded on the gateway host. A conversation at an
+    // SSH location reads them on its own machine, so copy them there first.
+    async stageAttachments(endpointKey, request) {
+      const conversation = await resolveEndpointConversation(harness, endpointKey);
+      const metadata = await harness.snapshot(ConversationDoc, conversation.id, context);
+      const attachments = Array.isArray(request?.attachments) ? request.attachments : [];
+      if (metadata?.location?.type !== "ssh") return { attachments, location: "local" };
+      const env = envs.remote(metadata.location, metadata.cwd);
+      const staged = await stageAttachments(env, { ...request, attachments }, context);
+      return { ...staged, location: "ssh" };
     },
 
     async waitSubmission(endpointKey, submissionId) {
