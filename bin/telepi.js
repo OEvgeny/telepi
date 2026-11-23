@@ -958,16 +958,16 @@ function validateConfig(config) {
   for (const [id, agent] of Object.entries(config.agents)) {
     if (!agent.entity_dir) errors.push(`agent ${id} missing entity_dir`);
     for (const skill of agent.skills || []) {
-      const path = join(config.project.root, skill);
+      const path = resolvePath(config.project.root, skill);
       if (!existsSync(path)) errors.push(`agent ${id} skill missing: ${relative(config.project.root, path)}`);
     }
     for (const extension of agent.extensions || []) {
-      const path = join(config.project.root, extension);
+      const path = resolvePath(config.project.root, extension);
       if (!existsSync(path)) errors.push(`agent ${id} extension missing: ${relative(config.project.root, path)}`);
     }
   }
   for (const extension of config.project.extensions || []) {
-    const path = join(config.project.root, extension);
+    const path = resolvePath(config.project.root, extension);
     if (!existsSync(path)) errors.push(`project extension missing: ${relative(config.project.root, path)}`);
   }
   if (config.sessions.max_bytes != null && (!Number.isSafeInteger(config.sessions.max_bytes) || config.sessions.max_bytes <= 0)) {
