@@ -44,14 +44,16 @@ fi
 resolve_topic_field() {
   local field="$1"
   node --input-type=module -e '
-    import { readConfig, findTopicByName, getAgent, resolveEntityDir, resolveTopicModel } from "./src/config.js";
+    import { readConfig, findTopicByName, getAgent, resolveEntityDir, resolveTopicModel, resolveTopicSession } from "./src/config.js";
     const [topicName, field] = process.argv.slice(1);
     const config = readConfig("config/telepi.yaml");
     const topic = findTopicByName(config, topicName);
     if (!topic) process.exit(3);
     const agent = getAgent(config, topic.agent);
+    const session = resolveTopicSession(config, topic, { agent });
     const values = {
-      sessionId: topic.session_id || agent.session_id || `${topic.agent}-${topic.topic_id}`,
+      sessionId: session.id,
+      cwd: session.cwd,
       model: resolveTopicModel(config, topic, agent) || "",
       entityDir: resolveEntityDir(config, agent),
     };
@@ -66,6 +68,10 @@ if [[ -z "$MODEL" ]]; then
   MODEL="$(resolve_topic_field model)"
 fi
 ENTITY_DIR="$(resolve_topic_field entityDir)"
+WORK_DIR="$(resolve_topic_field cwd)"
+if [[ -z "$WORK_DIR" ]]; then
+  WORK_DIR="$ROOT"
+fi
 
 report_failure() {
   local text="$1"
@@ -118,7 +124,13 @@ PI_ARGS=(
   --print
   --session-id "$SESSION_ID"
   --session-dir "$ROOT/.telepi/pi-sessions"
+  # The repo root is the project; the entity folder is only the agent home.
+  # Keep host-global context files out and append the entity identity explicitly.
+  --no-context-files
 )
+if [[ -f "$ENTITY_DIR/AGENTS.md" ]]; then
+  PI_ARGS+=(--append-system-prompt "$ENTITY_DIR/AGENTS.md")
+fi
 for skill in \
   "$ROOT/skills/telepi-dev/SKILL.md" \
   "$ROOT/skills/telepi-gateway-restart/SKILL.md"; do
@@ -154,7 +166,7 @@ fi
 
 set +e
 (
-  cd "$ENTITY_DIR"
+  cd "$WORK_DIR"
   "$PI_BIN" "${PI_ARGS[@]}" "$PROMPT"
 ) >"$ROOT/$LOG" 2>&1
 code=$?
