@@ -51,6 +51,10 @@ in `src/durable/topic.js` for the other backend) turns one topic into Pi inputs:
   resolver; anything else that resolves a configured path must too.
 - **Model.** The topic's `model` wins; otherwise the agent's main topic (the
   topic named after the agent) supplies it, with an optional `:thinking` suffix.
+  The suffix is an explicit level for that topic's runs: Pi writes a
+  `thinking_level_change` entry only when a session has none, so a session that
+  already carries a level keeps it, and a fork of that session resumes the
+  stored level rather than the pin's.
 - **Infrastructure.** `auth.json`, `models.json`, and `models-store.json` stay
   host-owned and are passed explicitly, never inherited from the entity folder.
   Session transcripts live in one shared `sessions_dir`.
